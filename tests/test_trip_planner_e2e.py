@@ -199,10 +199,17 @@ async def test_tools():
     logger.info(f"🎫 门票: {len(i['tickets'])}个, 均价¥{i['summary']['avg_ticket_per_attraction']}")
     logger.info(f"🚗 推荐车辆: {i['summary']['vehicle_recommended']} ¥{i['summary']['vehicle_price_per_day']}/天")
 
-    # FAQ
+    # FAQ (关键词)
     faq = await search_faq.ainvoke({"query": "北京 故宫 预约", "top_k": 3})
     f = json.loads(faq)
-    logger.info(f"📚 FAQ: {len(f)}条结果, Top: {f[0]['title'] if f else '无'}")
+    logger.info(f"📚 FAQ(关键词): {len(f)}条结果, Top: {f[0]['title'] if f else '无'}")
+
+    # RAG (语义检索) — 自动降级到关键词
+    from tools.rag_search import rag_search
+    rag = await rag_search.ainvoke({"query": "北京有什么好玩的", "top_k": 3})
+    r = json.loads(rag)
+    rag_titles = [d.get("title", "") for d in r]
+    logger.info(f"🔍 RAG: {len(r)}条结果, Titles: {rag_titles}")
 
 
 async def main():

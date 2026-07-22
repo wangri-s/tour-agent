@@ -97,6 +97,7 @@ class KnowledgeChunker:
         "拉萨": "city",
         "张家界": "city",
         "深圳": "city",
+        "城市": "city",
         "交通": "transport",
         "高铁": "transport",
         "地铁": "transport",
