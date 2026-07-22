@@ -1,0 +1,46 @@
+"""智能客服 Agent —— FAQ / 订单查询 / 退改政策 / 签证须知"""
+
+from __future__ import annotations
+
+from typing import Any
+
+from agents.base import BaseAgent
+from prompts.customer_service import CUSTOMER_SERVICE_PROMPT
+from graph.state import OverallState
+from tools.search_faq import search_faq
+from tools.check_handoff import check_handoff
+
+
+class CustomerServiceAgent(BaseAgent):
+    """多语言客服，专注 FAQ 答疑、政策解释、订单查询"""
+
+    def __init__(self):
+        super().__init__(name="customer_service")
+        self.tools = [search_faq, check_handoff]
+
+    def system_prompt(self) -> str:
+        return CUSTOMER_SERVICE_PROMPT
+
+    async def handle(self, state: OverallState) -> dict[str, Any]:
+        """处理客服对话
+
+        Returns:
+            {
+                "reply": str,       # 回复内容
+                "need_human": bool,
+                "messages": [...],
+            }
+        """
+
+        recent = [
+            {"role": m.type if hasattr(m, "type") else "assistant", "content": m.content}
+            for m in state.messages[-10:]
+        ]
+
+        result = await self.call_llm(recent, tools=self.tools)
+
+        return {
+            "reply": result.get("content", ""),
+            "need_human": result.get("need_human", False),
+            "messages": [],
+        }
