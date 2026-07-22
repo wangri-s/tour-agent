@@ -1,4 +1,4 @@
-"""FastAPI 入口 —— /chat 接口"""
+"""FastAPI 入口 —— /chat 接口 (千问驱动)"""
 
 from __future__ import annotations
 
@@ -6,11 +6,15 @@ import os
 import logging
 from contextlib import asynccontextmanager
 
+from dotenv import load_dotenv
+load_dotenv()
+
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 
-from graph import build_graph, OverallState, TripNeed
+from graph import build_graph
+from graph.state import OverallState
 
 # ---------------------------------------------------------------------------
 # 日志
@@ -32,17 +36,21 @@ _graph = None
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     global _graph
+    logger.info("=" * 50)
     logger.info("Starting tour-agent...")
+    logger.info(f"LLM Model: {os.getenv('LLM_MODEL', 'qwen-plus')}")
+    logger.info(f"API Base: {os.getenv('DASHSCOPE_BASE_URL', 'dashscope')}")
+    logger.info("=" * 50)
     _graph = build_graph()
-    logger.info("Graph compiled, ready to serve.")
+    logger.info("✅ Graph compiled, ready to serve.")
     yield
     logger.info("Shutting down.")
 
 
 app = FastAPI(
     title="tour-agent",
-    description="入境定制游 LangGraph Multi-Agent API",
-    version="0.1.0",
+    description="入境定制游 LangGraph Multi-Agent API (千问驱动)",
+    version="0.2.0",
     lifespan=lifespan,
 )
 
@@ -60,16 +68,20 @@ app.add_middleware(
 # ---------------------------------------------------------------------------
 
 class ChatRequest(BaseModel):
-    session_id: str = Field(..., description="会话唯一标识")
-    customer_id: str = Field(..., description="客户唯一标识")
-    channel: str = Field(..., description="渠道: whatsapp | wechat | web | messenger | tiktok")
-    message: str = Field(..., description="用户消息")
+    session_id: str = Field(..., description="会话唯一标识", examples=["sess-001"])
+    customer_id: str = Field(..., description="客户唯一标识", examples=["c-001"])
+    channel: str = Field(
+        default="web",
+        description="渠道: whatsapp | wechat | web | messenger | tiktok",
+        examples=["web"],
+    )
+    message: str = Field(..., description="用户消息", examples=["我想去北京玩5天，2个人，预算每人8000"])
     language: str = Field(default="zh", description="语言偏好")
 
 
 class ChatResponse(BaseModel):
     reply: str = Field(default="", description="最终回复")
-    draft: dict | None = Field(default=None, description="行程草案")
+    draft: dict | None = Field(default=None, description="行程草案 (Markdown + 费用)")
     quote: dict | None = Field(default=None, description="报价单")
     branch: str = Field(default="", description="当前分支")
     need_human: bool = Field(default=False, description="是否已转人工")
@@ -83,13 +95,14 @@ class ChatResponse(BaseModel):
 async def chat(req: ChatRequest):
     """统一对话入口
 
-    调用 LangGraph invoke，返回结构化响应。
+    流程: input_guard → session_context → intent_router
+              → [customer_service | sales_agent | operations_agent | trip_planner]
+              → ... → operations_sync → END
     """
 
     from langchain_core.messages import HumanMessage
 
-    # 构造初始 State
-    state: OverallState = OverallState(
+    state = OverallState(
         session_id=req.session_id,
         customer_id=req.customer_id,
         channel=req.channel,
@@ -98,6 +111,8 @@ async def chat(req: ChatRequest):
     )
 
     config = {"configurable": {"thread_id": req.session_id}}
+
+    logger.info(f"[API] {req.session_id} | {req.channel} | {req.message[:80]}...")
 
     try:
         result = await _graph.ainvoke(state, config)
@@ -108,11 +123,23 @@ async def chat(req: ChatRequest):
     # 构造响应
     draft_dict = None
     if result.get("draft") and result["draft"].itinerary_md:
-        draft_dict = result["draft"].model_dump()
+        draft_dict = {
+            "version": result["draft"].version,
+            "itinerary_md": result["draft"].itinerary_md,
+            "estimated_cost": result["draft"].estimated_cost,
+            "weather_summary": result["draft"].weather_summary,
+            "highlights": result["draft"].highlights,
+        }
 
     quote_dict = None
     if result.get("quote"):
         quote_dict = result["quote"].model_dump()
+
+    logger.info(
+        f"[API] {req.session_id} → branch={result.get('current_branch')}, "
+        f"reply_len={len(result.get('final_reply', ''))}, "
+        f"draft={'yes' if draft_dict else 'no'}"
+    )
 
     return ChatResponse(
         reply=result.get("final_reply", ""),
@@ -129,7 +156,12 @@ async def chat(req: ChatRequest):
 
 @app.get("/health")
 async def health():
-    return {"status": "ok", "version": "0.1.0"}
+    return {
+        "status": "ok",
+        "version": "0.2.0",
+        "model": os.getenv("LLM_MODEL", "qwen-plus"),
+        "provider": "dashscope (千问)",
+    }
 
 
 # ---------------------------------------------------------------------------

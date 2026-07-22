@@ -2,89 +2,91 @@
 
 ## 步骤 1：仓库创建与连接
 - **时间**：2026-07-22
-- **操作**：在 GitHub 创建空仓库 `wangri-s/tour-agent`，clone 到本地 `e:\Desktop\ai\旅游多agent`
+- **操作**：在 GitHub 创建空仓库 `wangri-s/tour-agent`，clone 到本地
 - **状态**：✅ 完成
 
 ## 步骤 2：项目骨架搭建
 - **时间**：2026-07-22
 - **操作**：按设计文档创建六层目录结构，55 个文件
-- **详情**：见 [implementation-plan.md](implementation-plan.md)
 - **状态**：✅ 完成
-
-### 2.1 graph/ 编排层（17 文件）
-- [x] `state.py` — OverallState + TripNeed + TripDraft + Quote 模型
-- [x] `builder.py` — LangGraph StateGraph 组装（13 节点 + 条件边）
-- [x] `routing.py` — 5 个条件边路由函数
-- [x] `nodes/input_guard.py` — 入参保护（截断 + PII 脱敏）
-- [x] `nodes/session_context.py` — 会话初始化
-- [x] `nodes/intent_router.py` — 意图路由器
-- [x] `nodes/customer_service.py` — 智能客服节点
-- [x] `nodes/sales_agent.py` — 销售 Agent 节点
-- [x] `nodes/operations_agent.py` — 运营 Agent 节点
-- [x] `nodes/trip_planner.py` — 旅游定制节点
-- [x] `nodes/intent_scorer.py` — 意向评分节点
-- [x] `nodes/revision_loop.py` — 修订计数器
-- [x] `nodes/quote_agent.py` — 报价节点
-- [x] `nodes/human_handoff.py` — 人工接管节点
-- [x] `nodes/operations_sync.py` — 终态汇聚节点
-
-### 2.2 agents/ 业务 Agent 层（8 文件）
-- [x] `base.py` — BaseAgent 抽象基类
-- [x] `intent_router.py` — 意图路由器 Agent
-- [x] `customer_service.py` — 智能客服 Agent
-- [x] `sales_agent.py` — 销售 Agent
-- [x] `operations_agent.py` — 运营 Agent
-- [x] `trip_planner.py` — 旅游定制 Agent
-- [x] `intent_scorer.py` — 意向评分 Agent
-- [x] `quote_agent.py` — 报价 Agent
-
-### 2.3 tools/ 工具层（8 文件）
-- [x] `search_faq.py` — FAQ 检索
-- [x] `check_handoff.py` — 转人工评估
-- [x] `get_weather.py` — 天气查询
-- [x] `query_calendar.py` — 节假日查询
-- [x] `query_inventory.py` — 库存查询
-- [x] `quote_price.py` — 报价计算
-- [x] `update_crm.py` — CRM 写入
-- [x] `send_capi.py` — CAPI 事件回传
-
-### 2.4 prompts/ 提示词层（7 文件）
-- [x] `intent_router.py` — 意图路由 prompt
-- [x] `customer_service.py` — 客服 prompt
-- [x] `sales_agent.py` — 销售 prompt
-- [x] `operations_agent.py` — 运营 prompt
-- [x] `trip_planner.py` — 定制 prompt
-- [x] `intent_scorer.py` — 评分 prompt
-- [x] `quote_agent.py` — 报价 prompt
-
-### 2.5 services/ 服务层（4 文件）
-- [x] `llm_gateway.py` — LLM 网关
-- [x] `database.py` — 数据库抽象
-- [x] `cache.py` — Redis 缓存
-- [x] `message_queue.py` — 消息队列
-
-### 2.6 根目录配置（5 文件）
-- [x] `main.py` — FastAPI `/chat` 入口
-- [x] `requirements.txt` — 依赖清单
-- [x] `.env.example` — 环境变量模板
-- [x] `.gitignore` — Git 忽略规则
-- [x] `README.md` — 项目说明
-
-### 2.7 tests/ 测试层（2 文件）
-- [x] `test_state.py` — State 模型 + 路由逻辑单元测试
 
 ## 步骤 3：推送到 GitHub
 - **时间**：2026-07-22
 - **操作**：`git add -A` → `git commit` → `git push -u origin main`
 - **状态**：✅ 完成
 
+## 步骤 4：创建进度和方案文档
+- **时间**：2026-07-22
+- **操作**：创建 `progress.md` + `implementation-plan.md`
+- **状态**：✅ 完成
+
+## 步骤 5：完善旅游定制 Agent（核心）
+- **时间**：2026-07-22
+- **状态**：✅ 完成
+
+### 5.1 创建中国入境游知识库
+- **文件**：`knowledge/china_travel_kb.md`
+- **内容**：20 个热门城市，含签证政策、景点(200+)、美食(100+)、交通、住宿、天气、线路推荐、预算参考、文化礼仪、应急信息
+- **验证**：✅ 知识库可被 FAQ 工具检索
+
+### 5.2 接入千问模型
+- **模型选择**：
+  - `qwen-turbo`：意图路由（轻量快速）
+  - `qwen-plus`：客服/销售/运营（主力模型）
+  - `qwen-max`：旅游定制/行程生成（旗舰复杂推理）
+- **API**：DashScope OpenAI 兼容协议
+- **网关升级**：新增 `chat_with_tools()` 多轮工具调用循环
+- **验证**：✅ API 调用成功，token 用量正常
+
+### 5.3 增强四个核心工具
+- **`search_faq`**：50+ 条 FAQ 条目，覆盖签证/城市/支付/交通/天气/礼仪
+- **`get_weather`**：10 个城市 × 12 个月真实气候数据 + 穿衣建议 + 旅游适宜度
+- **`query_calendar`**：2026 年完整中国节假日 + 拥挤度评级 + 出行建议
+- **`query_inventory`**：6 城市酒店(奢华/舒适/经济) + 门票 + 车辆数据库
+- **验证**：✅ 工具独立测试通过
+
+### 5.4 重写 TripPlannerAgent
+- **流程**：需求提取(qwen-turbo) → 并行查天气+日历+FAQ → 查库存 → qwen-max 生成完整行程
+- **输出**：Markdown 行程（每日安排+餐厅+酒店+费用预估+天气建议+实用贴士）
+- **验证**：✅ 4 个测试用例全部生成成功
+
+### 5.5 更新 System Prompt
+- **文件**：`prompts/trip_planner.py`
+- **内容**：15 年资深规划师角色，含节奏控制/交通约束/预算匹配/天气应对/节假日提醒/预约清单
+- **输出格式**：严格 Markdown 模板（概览+每日行程+费用预估+天气+贴士+应急）
+
+### 5.6 接入千问路由
+- **文件**：`agents/intent_router.py`
+- **模型**：`qwen-turbo`，temperature=0.1 保证一致性
+- **验证**：✅ 5/5 意图分类正确（4 planner + 1 service）
+
+### 5.7 更新 API 入口
+- **文件**：`main.py`
+- **配置**：自动加载 `.env`，支持 `DASHSCOPE_API_KEY`
+- **功能**：`/chat` + `/health` 接口
+- **版本**：v0.2.0
+
+### 5.8 端到端测试
+- **文件**：`tests/test_trip_planner_e2e.py`
+- **用例**：5 个（北京/成都/西安/FAQ/桂林）
+- **结果**：
+  - 意图路由：5/5 ✅
+  - 工具层：全部 ✅
+  - 行程生成：4/4 ✅
+    - 北京5日：2,152字，¥32,650/人
+    - 成都3日：1,994字，¥4,775/人
+    - 西安4日：1,399字
+    - 桂林4日：2,043字，¥15,550/人
+
 ---
 
 ## 待办
 
-- [ ] MVP 阶段：安装依赖，跑通 `/chat` 接口
-- [ ] MVP 阶段：接入真实 OpenAI API，验证意图路由 + 客服 + 定制三条链路
-- [ ] Phase 2：接入向量库 (Milvus/pgvector) 做 FAQ RAG
-- [ ] Phase 2：接入真实天气 API 与库存 API
+- [ ] 安装依赖 + 启动 FastAPI 服务，调通 `/chat` 接口
+- [ ] 修复日期提取年份默认值
+- [ ] Phase 2：接入真实天气 API（和风天气/OpenWeatherMap）
+- [ ] Phase 2：接入矢量数据库做 FAQ RAG
+- [ ] Phase 2：接入真实库存 API（PMS）
 - [ ] Phase 3：PostgresSaver 替换 MemorySaver
 - [ ] Phase 3：接入 Langfuse 可观测
+- [ ] Phase 3：本地 7B 模型微调做意图路由
