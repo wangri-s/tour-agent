@@ -376,3 +376,163 @@ get_weather  calendar  search_faq
 - **模型**：`qwen-turbo`，temperature=0.1 保证一致性
 - **验证**：5/5 分类正确（planner 0.9 / service 0.75-0.85 / 全部正确路由）
 - **性能**：单次调用 ~300 tokens in, ~65 tokens out，延迟 ~2s
+
+---
+
+## 11. RAG + 三层记忆系统 (v0.3.0)
+
+### 11.1 架构概览
+
+```
+┌──────────────────────────────────────────────────────────────┐
+│                     MemoryOrchestrator                        │
+│                                                               │
+│  ┌─────────────────┐  ┌─────────────────┐  ┌───────────────┐ │
+│  │ Short-Term      │  │ Working         │  │ Long-Term     │ │
+│  │ (Redis)         │  │ (Kafka)         │  │ (MySQL)       │ │
+│  │                 │  │                 │  │               │ │
+│  │ 会话上下文 30m  │  │ Agent 事件流    │  │ 消息归档 永久 │ │
+│  │ 客户热缓存 24h  │  │ 异步任务分发    │  │ 客户画像 永久 │ │
+│  │ 频率限制 1m     │  │ 跨Agent通信     │  │ 行程记录 永久 │ │
+│  │ 工具缓存 10m    │  │ 分析埋点        │  │ RAG 反馈 永久 │ │
+│  └─────────────────┘  └─────────────────┘  └───────────────┘ │
+│                            ↕                                  │
+│                    Kafka → MySQL 事件桥接                     │
+└──────────────────────────────────────────────────────────────┘
+```
+
+### 11.2 真正的 RAG 实现
+
+**之前 (search_faq)**：Python `dict` + 关键词字符串匹配
+
+**现在 (rag_search)**：DashScope text-embedding-v3 + Milvus 向量数据库
+
+| 维度 | 旧版 (Keyword) | 新版 (RAG) |
+|------|---------------|-----------|
+| 检索方式 | `query in key` 字符串匹配 | 1024维向量 COSINE 相似度 |
+| 语义理解 | ❌ "便宜酒店" 匹配不到 "经济住宿" | ✅ 语义向量自动关联 |
+| 多语言 | ❌ 中文query查英文key不行 | ✅ 跨语言向量对齐 |
+| 可扩展 | ❌ 硬编码50条FAQ | ✅ Milvus 支持百万级 |
+| 降级策略 | N/A | Milvus不可用→自动回退关键词 |
+| 结果缓存 | ❌ 无 | ✅ Redis 缓存 10min TTL |
+
+**流程**：
+```
+用户查询 "北京雨季怎么办"
+  → [DashScope Embedding → 1024维向量]
+  → [Milvus ANN 搜索 travel_knowledge Collection]
+  → [COSINE ≥ 0.3 过滤]
+  → [返回: 北京天气指南(0.87), 室内景点推荐(0.82), 雨季穿衣建议(0.75)]
+  → [Redis 缓存 10min]
+```
+
+**降级链路**：
+```
+Milvus连接失败 → Embedding失败 → 自动降级到 search_faq 关键词匹配
+```
+
+### 11.3 DashScope Embedding
+
+- **模型**：`text-embedding-v3` (1024维)
+- **调用方式**：直接 HTTP (urllib)，不依赖 OpenAI SDK
+- **批量处理**：每批 ≤25 条，自动分批
+- **text_type 区分**：document (知识库) / query (用户查询)
+- **重试**：最多 3 次，间隔 1s/2s/3s
+
+### 11.4 知识库索引
+
+- **脚本**：`scripts/index_knowledge_base.py`
+- **切片策略**：
+  - `##` 二级标题 → 文档边界
+  - 块大小 100-1500 字符
+  - 自动分类检测 (visa/city/food/transport/culture/emergency 等 16 类)
+  - 过短块 (<100字符) 自动合并到上一块
+- **索引模式**：
+  - 全量：`python scripts/index_knowledge_base.py`
+  - 增量：`python scripts/index_knowledge_base.py --incremental`
+  - 重建：`python scripts/index_knowledge_base.py --rebuild`
+
+### 11.5 三层记忆数据流
+
+#### 读取 (Recall)
+```
+用户请求
+  → Redis 短时记忆 (热数据, 最快)
+    → 命中 → 返回 + 续期 TTL
+    → 未命中 → MySQL 长时记忆 (冷数据)
+      → 有数据 → 回填 Redis + 返回
+      → 无数据 → 返回空
+```
+
+#### 写入 (Remember)
+```
+新消息到达
+  → Redis 立即写入 (设置 TTL)
+  → Kafka 发布事件 (异步, 不阻塞)
+  → Kafka Consumer → MySQL 持久化 (后台)
+```
+
+### 11.6 基础设施
+
+| 服务 | 端口 | 用途 |
+|------|------|------|
+| Milvus | 19530 | 向量数据库 (RAG) |
+| Etcd | 2379 | Milvus 元数据 |
+| MinIO | 9000/9001 | Milvus 对象存储 |
+| Redis | 6379 | 短时记忆 |
+| Kafka | 9092 | 工作记忆 |
+| Kafka-UI | 8080 | Kafka 管理界面 |
+| MySQL | 3306 | 长时记忆 |
+
+### 11.7 新增文件清单
+
+| 文件 | 用途 |
+|------|------|
+| `docker-compose.yml` | 全部基础设施一键编排 |
+| `deploy/init.sql` | MySQL 6 张表初始化 |
+| `deploy/redis.conf` | Redis 持久化配置 |
+| `services/vector_store.py` | MilvusStore + EmbeddingService |
+| `services/redis_cache.py` | Redis 短时记忆 (完整实现) |
+| `services/kafka_broker.py` | Kafka 工作记忆 (完整实现) |
+| `services/mysql_store.py` | MySQL 长时记忆 (完整实现) |
+| `services/memory/__init__.py` | 三层记忆模块入口 |
+| `services/memory/short_term.py` | 短时记忆业务封装 |
+| `services/memory/working.py` | 工作记忆业务封装 |
+| `services/memory/long_term.py` | 长时记忆业务封装 |
+| `services/memory/orchestrator.py` | 三层编排器 + 事件桥接 |
+| `tools/rag_search.py` | RAG 语义检索工具 |
+| `scripts/index_knowledge_base.py` | 知识库索引脚本 |
+
+### 11.8 更新文件清单
+
+| 文件 | 变更内容 |
+|------|---------|
+| `main.py` | v0.3.0, 集成 MemoryOrchestrator, 消息自动归档 |
+| `agents/trip_planner.py` | search_faq → rag_search |
+| `tools/__init__.py` | 导出 rag_search |
+| `requirements.txt` | pymilvus, redis[hiredis], aiokafka, aiomysql |
+| `.env.example` | MILVUS_HOST, MYSQL_URL, KAFKA_BOOTSTRAP_SERVERS |
+
+---
+
+## 12. 关键设计决策总结
+
+| 决策点 | 方案 | 原因 |
+|--------|------|------|
+| State 基类 | `MessagesState` | LangGraph 内置，自带消息 reducer |
+| 数据模型 | Pydantic v2 `BaseModel` | 类型安全、序列化、校验 |
+| 意图路由模型 | qwen-turbo (千问) | 低成本、低延迟，DashScope 原生 |
+| Checkpoint | MemorySaver → PostgresSaver | 开发期零依赖，生产期持久化 |
+| 工具封装 | LangChain `@tool` | 标准装饰器，方便切 MCP |
+| LLM 调用 | DashScope OpenAI 兼容 | 千问三档模型分层 (turbo/plus/max) |
+| **RAG 检索引擎** | **Milvus + DashScope Embedding** | **语义向量检索，1024维，COSINE 相似度** |
+| **短时记忆** | **Redis (hiredis)** | **会话热数据 30min TTL，LRU 淘汰** |
+| **工作记忆** | **Kafka (KRaft)** | **事件流 + 异步任务，gzip 压缩，ack=all** |
+| **长时记忆** | **MySQL 8.0 (aiomysql)** | **消息归档+画像+行程+事件持久化** |
+| **记忆编排读** | **Redis→miss→MySQL→回填Redis** | **Cache-Aside 模式** |
+| **记忆编排写** | **Redis→Kafka→MySQL** | **热数据同步 + 异步持久化** |
+| **服务降级** | **RAG 不可用→关键词回退** | **Milvus/Embedding 失败不阻塞业务** |
+| 错误处理 | try/except 非阻断 | `operations_sync` 写 CRM/CAPI 失败不抛异常 |
+| 修订上限 | 硬编码 3 次 | 路由函数 `revision_count < 3` 判断 |
+| API 框架 | FastAPI | 异步原生、Pydantic 集成、自动文档 |
+| 项目结构 | 六层分离 + 记忆层 | graph/agents/tools/services/prompts/tests + memory |

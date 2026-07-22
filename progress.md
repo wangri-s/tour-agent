@@ -80,13 +80,76 @@
 
 ---
 
+## 步骤 6：真正实现 RAG + Milvus + 三层记忆系统
+
+- **时间**：2026-07-22
+- **状态**：✅ 完成
+
+### 6.1 基础设施 (Docker Compose)
+- **文件**：`docker-compose.yml`
+- **服务**：Milvus (向量DB) + Redis (短时记忆) + Kafka (工作记忆) + MySQL (长时记忆) + Etcd + MinIO + Kafka-UI
+- **一键启动**：`docker compose up -d`
+
+### 6.2 Milvus 向量存储 + DashScope Embedding
+- **文件**：`services/vector_store.py`
+- **嵌入模型**：DashScope `text-embedding-v3` (1024维)
+- **Milvus**：Collection `travel_knowledge`，COSINE 相似度 + IVF_FLAT 索引
+- **特性**：批量插入、语义搜索、分数过滤、分类过滤、懒连接
+
+### 6.3 Redis 短时记忆层
+- **文件**：`services/redis_cache.py`
+- **功能**：会话上下文(30min TTL)、客户画像热缓存(24h)、频率限制(滑动窗口)、Agent 临时状态、工具结果缓存(10min)、分布式锁
+- **Key 命名空间**：`tourai:session:*`, `tourai:customer:*`, `tourai:ratelimit:*`, 等
+
+### 6.4 Kafka 工作记忆层
+- **文件**：`services/kafka_broker.py`
+- **Topic**：agent-events (3分区)、trip-tasks (3分区)、crm-sync、capi-send、analytics、notifications
+- **事件类型**：intent_detected, trip_generated, trip_accepted, quote_created, human_handoff, error_occurred 等 12 种
+- **特性**：异步发布/订阅、手动 offset 提交、gzip 压缩、ack=all
+
+### 6.5 MySQL 长时记忆层
+- **文件**：`services/mysql_store.py` + `deploy/init.sql`
+- **表**：conversations, customer_profiles, trips, agent_events, faq_feedback, knowledge_docs
+- **特性**：aiomysql 连接池、JSON 自动序列化、ON DUPLICATE KEY upsert、RAG 质量统计
+
+### 6.6 RAG 语义检索工具
+- **文件**：`tools/rag_search.py`
+- **流程**：用户查询 → Embedding(1024维) → Milvus ANN搜索 → 分数过滤(≥0.3) → 格式化返回
+- **降级**：Milvus 不可用 → 自动回退 `search_faq` 关键词匹配
+- **缓存**：Redis 缓存工具结果 (TTL 10min)
+
+### 6.7 知识库索引脚本
+- **文件**：`scripts/index_knowledge_base.py`
+- **功能**：Markdown → 标题切块 → DashScope Embedding → Milvus 批量写入
+- **模式**：全量 / 增量 / 重建 / 单文件
+- **分类**：自动检测 city/visa/transport/weather/food/budget/culture/emergency 等类别
+
+### 6.8 三层记忆编排器
+- **文件**：`services/memory/` (5个文件)
+- **MemoryOrchestrator**：统一读写接口，自动协调三层
+  - **读策略**：Redis → miss → MySQL → 回填 Redis
+  - **写策略**：Redis(先写) → Kafka(事件) → MySQL(异步持久)
+  - **事件桥接**：Kafka Consumer → MySQL agent_events 表
+
+### 6.9 TripPlannerAgent 接入 RAG
+- **文件**：`agents/trip_planner.py`
+- **变更**：知识检索从 `search_faq` 切换为 `rag_search`
+- **query**：`"{destination} 旅游指南 美食 景点 交通"` — 语义匹配更全面
+
+### 6.10 main.py 集成
+- **文件**：`main.py`
+- **版本**：v0.2.0 → v0.3.0
+- **变更**：启动时自动连接三层记忆，消息自动归档，health check 包含记忆状态
+
+---
 ## 待办
 
-- [ ] 安装依赖 + 启动 FastAPI 服务，调通 `/chat` 接口
+- [ ] `docker compose up -d` 启动基础设施
+- [ ] `pip install -r requirements.txt` 安装新依赖
+- [ ] `python scripts/index_knowledge_base.py` 索引知识库
+- [ ] 启动 FastAPI 服务，调通 `/chat` 接口
 - [ ] 修复日期提取年份默认值
 - [ ] Phase 2：接入真实天气 API（和风天气/OpenWeatherMap）
-- [ ] Phase 2：接入矢量数据库做 FAQ RAG
-- [ ] Phase 2：接入真实库存 API（PMS）
 - [ ] Phase 3：PostgresSaver 替换 MemorySaver
 - [ ] Phase 3：接入 Langfuse 可观测
 - [ ] Phase 3：本地 7B 模型微调做意图路由

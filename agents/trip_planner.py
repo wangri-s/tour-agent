@@ -1,12 +1,14 @@
-"""旅游定制 Agent —— 完整工具调用链 + 结构化行程生成
+"""旅游定制 Agent —— 完整工具调用链 + 结构化行程生成 (RAG 增强版)
 
 流程:
     1. 意图识别 → 获取用户需求 (目的地/天数/日期/人数/预算)
-    2. 查询天气 (get_weather) → 判断出行适宜度
-    3. 查询日历 (query_calendar) → 判断是否节假日/拥挤
+    2. 并行查询天气 (get_weather) + 日历 (query_calendar)
+    3. RAG 语义检索知识库 (rag_search) → 城市指南/美食/交通/文化
     4. 查询库存 (query_inventory) → 酒店/门票/车辆
-    5. 查知识库 (search_faq) → 获取城市指南/美食/线路
-    6. 综合生成 Markdown 行程草案
+    5. 综合生成 Markdown 行程草案 (qwen-max)
+
+与旧版区别: 知识检索从关键词匹配(search_faq)升级为 RAG 语义搜索(rag_search),
+    Milvus 不可用时自动回退到关键词匹配。
 """
 
 from __future__ import annotations
@@ -21,7 +23,7 @@ from graph.state import OverallState, TripDraft, TripNeed
 from tools.get_weather import get_weather
 from tools.query_calendar import query_calendar
 from tools.query_inventory import query_inventory
-from tools.search_faq import search_faq
+from tools.rag_search import rag_search
 from services.llm_gateway import gateway_planner, gateway_router
 
 logger = logging.getLogger(__name__)
@@ -38,7 +40,7 @@ class TripPlannerAgent(BaseAgent):
         super().__init__(name="trip_planner")
         # 使用旗舰模型
         self.llm = gateway_planner
-        self.tools = [get_weather, query_calendar, query_inventory, search_faq]
+        self.tools = [get_weather, query_calendar, query_inventory, rag_search]
 
     def system_prompt(self) -> str:
         return TRIP_PLANNER_PROMPT
@@ -92,11 +94,11 @@ class TripPlannerAgent(BaseAgent):
         )
 
         # =====================================================================
-        # Step 2: 并行查询天气 + 日历 + 知识库
+        # Step 2: 并行查询天气 + 日历 + RAG 知识库
         # =====================================================================
         weather_data = await get_weather.ainvoke({"city": need.destination, "date": need.arrival_date})
         calendar_data = await query_calendar.ainvoke({"date": need.arrival_date})
-        faq_data = await search_faq.ainvoke({"query": need.destination, "top_k": 3})
+        faq_data = await rag_search.ainvoke({"query": f"{need.destination} 旅游指南 美食 景点 交通", "top_k": 3})
 
         logger.info(f"[TripPlanner] 天气: {weather_data[:200]}")
         logger.info(f"[TripPlanner] 日历: {calendar_data[:200]}")
