@@ -1,8 +1,9 @@
-"""FastAPI 入口 —— /chat 接口 (千问驱动 + 三层记忆 + RAG + COT + 可观测)"""
+"""FastAPI 入口 —— /chat 接口 (千问驱动 + 三层记忆 + RAG + COT + LangSmith + Langfuse)"""
 
 from __future__ import annotations
 
 import os
+import time
 import logging
 from contextlib import asynccontextmanager
 
@@ -18,6 +19,20 @@ from graph.state import OverallState
 from services.memory import MemoryOrchestrator
 from services.observability import start_trace, end_trace, get_trace
 from services.context_compressor import get_compressor
+
+# LangSmith (LangGraph 官方可观测平台, 自动追踪节点图)
+_LANGSMITH_READY = False
+_langsmith_client = None
+try:
+    import langsmith as ls
+    _langsmith_api_key = os.getenv("LANGCHAIN_API_KEY", "")
+    if _langsmith_api_key and "xxx" not in _langsmith_api_key:
+        _langsmith_client = ls.Client()
+        _LANGSMITH_READY = True
+except ImportError:
+    pass
+except Exception:
+    pass
 
 # ---------------------------------------------------------------------------
 # 日志
@@ -36,15 +51,16 @@ logger = logging.getLogger("tour-agent")
 _graph = None
 _memory: MemoryOrchestrator | None = None
 _postgres_checkpoint = False
+_langsmith_ready = _LANGSMITH_READY
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     global _graph, _memory, _postgres_checkpoint
     logger.info("=" * 50)
-    logger.info("Starting tour-agent v0.4.0 — COT + PostgresSaver + Langfuse + WeatherAPI")
+    logger.info("Starting tour-agent v0.5.0 — LangSmith + Langfuse + COT + PostgresSaver")
     logger.info(f"LLM Model: {os.getenv('LLM_MODEL', 'qwen-plus')}")
-    logger.info(f"API Base: {os.getenv('DASHSCOPE_BASE_URL', 'dashscope')}")
+    logger.info(f"LangSmith: {'✅' if _langsmith_ready else '⚠️ 未配置'}")
     logger.info("=" * 50)
 
     # 启动三层记忆系统
@@ -73,7 +89,7 @@ async def lifespan(app: FastAPI):
 app = FastAPI(
     title="tour-agent",
     description="入境定制游 LangGraph Multi-Agent API — 千问驱动 + 三层记忆 + RAG",
-    version="0.4.0",
+    version="0.5.0",
     lifespan=lifespan,
 )
 
@@ -118,6 +134,7 @@ class ChatResponse(BaseModel):
 async def chat(req: ChatRequest):
     """统一对话入口
 
+    LangGraph 节点自动被 LangSmith 追踪 (设置 LANGCHAIN_API_KEY 后)。
     流程: input_guard → session_context → intent_router
               → [customer_service | sales_agent | operations_agent | trip_planner]
               → ... → operations_sync → END
@@ -125,10 +142,36 @@ async def chat(req: ChatRequest):
 
     from langchain_core.messages import HumanMessage
 
-    # 开始可观测性追踪
+    t_start = time.time()
+
+    # =========================================================================
+    # LangSmith Trace 上下文 (自动追踪 Graph 节点 + LLM + Tool 调用)
+    # =========================================================================
+    ls_ctx = None
+    if _langsmith_ready and ls:
+        try:
+            ls_ctx = ls.trace(
+                name="chat",
+                inputs={"message": req.message[:200], "channel": req.channel},
+                metadata={
+                    "session_id": req.session_id,
+                    "customer_id": req.customer_id,
+                    "channel": req.channel,
+                    "language": req.language,
+                    "version": "0.5.0",
+                },
+                tags=[req.channel, req.language, "tour-agent"],
+            )
+            ls_ctx.__enter__()
+        except Exception:
+            ls_ctx = None
+
+    # =========================================================================
+    # Langfuse 追踪 (LLM Token + 自定义 Span)
+    # =========================================================================
     trace = start_trace(req.session_id, req.customer_id)
 
-    # 上下文压缩: 获取历史消息 + 新消息，压缩后传入 State
+    # 上下文压缩
     history_msgs = []
     if _memory:
         history = await _memory.recall_context(req.session_id)
@@ -151,7 +194,6 @@ async def chat(req: ChatRequest):
     )
 
     config = {"configurable": {"thread_id": req.session_id}}
-
     logger.info(f"[API] {req.session_id} | {req.channel} | {req.message[:80]}...")
 
     # 保存用户消息到三层记忆
@@ -168,15 +210,21 @@ async def chat(req: ChatRequest):
     trace.add_span("input_processing", "pipeline", input_data=req.message[:200],
                    metadata={"msg_count": len(all_messages), "compressed": len(compressed) < len(all_messages)})
 
+    # =========================================================================
+    # 调用 LangGraph (节点自动被 LangSmith 追踪)
+    # =========================================================================
     try:
         result = await _graph.ainvoke(state, config)
     except Exception as e:
         logger.exception("Graph invocation failed")
         trace.add_span("error", "pipeline", error=str(e))
         end_trace()
+        if ls_ctx:
+            try: ls_ctx.__exit__(type(e), e, e.__traceback__)
+            except: pass
         raise HTTPException(status_code=500, detail=str(e))
 
-    # 构造响应 (先构造，再保存记忆)
+    # 构造响应
     draft_dict = None
     raw_draft = result.get("draft")
     if raw_draft:
@@ -199,45 +247,35 @@ async def chat(req: ChatRequest):
     if _memory and result.get("final_reply"):
         branch = result.get("current_branch", "")
         await _memory.remember_message(
-            session_id=req.session_id,
-            customer_id=req.customer_id,
-            role="assistant",
-            content=result["final_reply"],
-            channel=req.channel,
-            language=req.language,
-            branch=branch,
+            session_id=req.session_id, customer_id=req.customer_id,
+            role="assistant", content=result["final_reply"],
+            channel=req.channel, language=req.language, branch=branch,
         )
         await _memory.remember_event(
             event_type="response_generated",
-            session_id=req.session_id,
-            customer_id=req.customer_id,
+            session_id=req.session_id, customer_id=req.customer_id,
             agent_name=branch,
-            payload={
-                "reply_len": len(result.get("final_reply", "")),
-                "has_draft": bool(draft_dict),
-                "has_quote": bool(quote_dict),
-            },
+            payload={"reply_len": len(result.get("final_reply", "")),
+                      "has_draft": bool(draft_dict), "has_quote": bool(quote_dict)},
         )
 
     final_reply = result.get("final_reply", "")
-
-    # 备选: 如果 reply 为空但已有行程草案，构造默认回复
     if not final_reply and draft_dict:
-        dest = draft_dict.get("highlights", [""])[0] if draft_dict.get("highlights") else ""
         cost = draft_dict.get("estimated_cost", 0)
         cost_str = f"\n💰 预估人均费用：**¥{cost:,.0f}**" if cost > 0 else ""
         final_reply = (
-            f"为您定制了 **{dest}** 行程 ✨{cost_str}\n\n"
-            f"📋 行程已生成，包含 {draft_dict.get('daily_notes', [])} 天详细安排。您可以：\n"
-            f'- ✅ **满意** → 回复「好的/可以/满意」，我为您生成报价单\n'
-            f'- 🔄 **修改** → 告诉我哪里需要调整（如「多加点美食」、「节奏太赶了」）\n'
+            f"为您定制了行程 ✨{cost_str}\n\n"
+            f"📋 行程已生成。您可以：\n"
+            f'- ✅ **满意** → 回复「好的」，我为您生成报价单\n'
+            f'- 🔄 **修改** → 告诉我哪里需要调整\n'
             f'- 📞 **人工** → 回复「转人工」，由旅行顾问接洽'
         )
 
+    latency_ms = (time.time() - t_start) * 1000
     logger.info(
-        f"[API] {req.session_id} → branch={result.get('current_branch')}, "
-        f"reply_len={len(final_reply)}, "
-        f"draft={'yes' if draft_dict else 'no'}"
+        f"[API] {req.session_id} → branch={result.get('current_branch')} "
+        f"reply={len(final_reply)} draft={'yes' if draft_dict else 'no'} "
+        f"latency={latency_ms:.0f}ms"
     )
 
     # 结束追踪
@@ -245,13 +283,19 @@ async def chat(req: ChatRequest):
                    output_data=final_reply[:200],
                    metadata={"branch": result.get("current_branch", ""),
                              "draft_len": len(draft_dict.get("itinerary_md", "")) if draft_dict else 0,
-                             "has_quote": bool(quote_dict)})
+                             "has_quote": bool(quote_dict),
+                             "total_latency_ms": round(latency_ms)})
     end_trace()
 
+    # 关闭 LangSmith trace
+    if ls_ctx:
+        try:
+            ls_ctx.__exit__(None, None, None)
+        except Exception:
+            pass
+
     return ChatResponse(
-        reply=final_reply,
-        draft=draft_dict,
-        quote=quote_dict,
+        reply=final_reply, draft=draft_dict, quote=quote_dict,
         branch=result.get("current_branch", ""),
         need_human=result.get("need_human", False),
     )
@@ -269,12 +313,13 @@ async def health():
 
     return {
         "status": "ok",
-        "version": "0.4.0",
+        "version": "0.5.0",
         "model": os.getenv("LLM_MODEL", "qwen-plus"),
         "provider": "dashscope (千问)",
         "features": {
             "checkpoint": "postgres" if _postgres_checkpoint else "memory",
-            "observability": os.getenv("LANGFUSE_PUBLIC_KEY", "") != "",
+            "langsmith": _langsmith_ready,
+            "langfuse": os.getenv("LANGFUSE_PUBLIC_KEY", "") != "",
             "weather_api": os.getenv("QWEATHER_API_KEY", "") != "",
             "rag": "milvus+dashscope",
             "cot_prompts": True,
