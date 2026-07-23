@@ -31,7 +31,8 @@ async def input_guard(state: OverallState) -> PartialState:
         3. PII 脱敏
         4. 写入 messages
     """
-    last_msg = state.messages[-1] if state.messages else None
+    msgs = state.get("messages", []) if isinstance(state, dict) else state.messages
+    last_msg = msgs[-1] if msgs else None
     if last_msg is None:
         return {}
 

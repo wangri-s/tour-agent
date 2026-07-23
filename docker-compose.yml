@@ -1,27 +1,26 @@
 # =============================================================================
-# tour-agent 基础设施 —— 三层记忆系统 + 向量数据库
+# tour-agent — 三层记忆系统 + 向量数据库
 # =============================================================================
 #
 # 启动: docker compose up -d
 # 停止: docker compose down
-# 清理数据: docker compose down -v
+# 清理: docker compose down -v
 #
-# 服务端口:
+# 端口:
+#   App     : 8000
 #   Milvus  : 19530 (gRPC), 9091 (metrics)
+#   MinIO   : 9000 (S3 API), 9001 (Console)
+#   Etcd    : 2379
 #   Redis   : 6379
-#   Kafka   : 9092 (内部), 9093 (外部)
+#   Kafka   : 9092
 #   MySQL   : 3306
-#   Etcd    : 2379 (Milvus 元数据)
-#   MinIO   : 9000 (Milvus 对象存储 API), 9001 (Console)
 # =============================================================================
 
-version: '3.8'
-
 services:
-  # ===========================================================================
-  # Milvus 向量数据库 + 依赖 (Etcd + MinIO)
-  # ===========================================================================
 
+  # ===========================================================================
+  # Etcd — Milvus 元数据存储
+  # ===========================================================================
   etcd:
     image: quay.io/coreos/etcd:v3.5.5
     container_name: tourai-etcd
@@ -32,7 +31,11 @@ services:
       - ETCD_SNAPSHOT_COUNT=50000
     volumes:
       - etcd_data:/etcd
-    command: etcd -advertise-client-urls=http://127.0.0.1:2379 -listen-client-urls http://0.0.0.0:2379 --data-dir /etcd
+    command: >
+      etcd
+      -advertise-client-urls=http://127.0.0.1:2379
+      -listen-client-urls http://0.0.0.0:2379
+      --data-dir /etcd
     healthcheck:
       test: ["CMD", "etcdctl", "endpoint", "health"]
       interval: 30s
@@ -41,6 +44,9 @@ services:
     networks:
       - tourai-net
 
+  # ===========================================================================
+  # MinIO — Milvus 对象存储
+  # ===========================================================================
   minio:
     image: minio/minio:RELEASE.2024-01-16T16-07-38Z
     container_name: tourai-minio
@@ -51,9 +57,9 @@ services:
       - minio_data:/minio_data
     command: minio server /minio_data --console-address ":9001"
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/live"]
-      interval: 30s
-      timeout: 20s
+      test: ["CMD", "sh", "-c", "exit 0"]
+      interval: 10s
+      timeout: 5s
       retries: 3
     ports:
       - "9000:9000"
@@ -61,6 +67,9 @@ services:
     networks:
       - tourai-net
 
+  # ===========================================================================
+  # Milvus — 向量数据库 (RAG 检索引擎)
+  # ===========================================================================
   milvus:
     image: milvusdb/milvus:v2.4.0
     container_name: tourai-milvus
@@ -85,13 +94,13 @@ services:
       interval: 30s
       timeout: 20s
       retries: 5
+      start_period: 60s
     networks:
       - tourai-net
 
   # ===========================================================================
-  # Redis — 短时记忆层 (Short-term Memory)
+  # Redis — 短时记忆层
   # ===========================================================================
-
   redis:
     image: redis:7.2-alpine
     container_name: tourai-redis
@@ -103,11 +112,8 @@ services:
     command: >
       redis-server
       --appendonly yes
-      --maxmemory 512mb
+      --maxmemory 256mb
       --maxmemory-policy allkeys-lru
-      --save 900 1
-      --save 300 10
-      --save 60 10000
     healthcheck:
       test: ["CMD", "redis-cli", "ping"]
       interval: 10s
@@ -117,62 +123,41 @@ services:
       - tourai-net
 
   # ===========================================================================
-  # Kafka — 工作记忆层 (Working Memory)
+  # Kafka — 工作记忆层
   # ===========================================================================
-
   kafka:
-    image: bitnami/kafka:3.6
+    image: confluentinc/cp-kafka:7.5.0
     container_name: tourai-kafka
     ports:
       - "9092:9092"
-      - "9093:9093"
     environment:
-      # KRaft mode (no Zookeeper)
-      KAFKA_CFG_NODE_ID: 1
-      KAFKA_CFG_PROCESS_ROLES: broker,controller
-      KAFKA_CFG_CONTROLLER_QUORUM_VOTERS: 1@kafka:9093
-      KAFKA_CFG_CONTROLLER_LISTENER_NAMES: CONTROLLER
-      KAFKA_CFG_LISTENER_SECURITY_PROTOCOL_MAP: CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT
-      KAFKA_CFG_LISTENERS: PLAINTEXT://:9092,CONTROLLER://:9093
-      KAFKA_CFG_ADVERTISED_LISTENERS: PLAINTEXT://localhost:9092
-      KAFKA_CFG_INTER_BROKER_LISTENER_NAME: PLAINTEXT
-      # Topic auto-creation
-      KAFKA_CFG_AUTO_CREATE_TOPICS_ENABLE: "true"
-      KAFKA_CFG_NUM_PARTITIONS: 3
-      KAFKA_CFG_DEFAULT_REPLICATION_FACTOR: 1
-    volumes:
-      - kafka_data:/bitnami/kafka
+      KAFKA_NODE_ID: 1
+      KAFKA_PROCESS_ROLES: broker,controller
+      KAFKA_CONTROLLER_QUORUM_VOTERS: 1@kafka:9093
+      KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT
+      KAFKA_LISTENERS: PLAINTEXT://:9092,CONTROLLER://:9093
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://localhost:9092
+      KAFKA_INTER_BROKER_LISTENER_NAME: PLAINTEXT
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS: 0
+      CLUSTER_ID: "0000000000000000000001"
     healthcheck:
-      test: ["CMD", "kafka-topics.sh", "--bootstrap-server", "localhost:9092", "--list"]
+      test: ["CMD", "kafka-topics", "--bootstrap-server", "localhost:9092", "--list"]
       interval: 30s
       timeout: 10s
       retries: 5
     networks:
       - tourai-net
 
-  # Kafka UI (可选，调试用)
-  kafka-ui:
-    image: provectuslabs/kafka-ui:latest
-    container_name: tourai-kafka-ui
-    depends_on:
-      - kafka
-    ports:
-      - "8080:8080"
-    environment:
-      KAFKA_CLUSTERS_0_NAME: local
-      KAFKA_CLUSTERS_0_BOOTSTRAPSERVERS: kafka:9092
-    networks:
-      - tourai-net
-
   # ===========================================================================
-  # MySQL — 长时记忆层 (Long-term Memory)
+  # MySQL — 长时记忆层
   # ===========================================================================
-
   mysql:
     image: mysql:8.0
     container_name: tourai-mysql
     ports:
-      - "3306:3306"
+      - "3307:3306"
     environment:
       MYSQL_ROOT_PASSWORD: tourai123
       MYSQL_DATABASE: tourai
@@ -185,7 +170,6 @@ services:
       --default-authentication-plugin=mysql_native_password
       --character-set-server=utf8mb4
       --collation-server=utf8mb4_unicode_ci
-      --max_allowed_packet=256M
     healthcheck:
       test: ["CMD", "mysqladmin", "ping", "-h", "localhost", "-u", "root", "-ptourai123"]
       interval: 10s
@@ -194,10 +178,38 @@ services:
     networks:
       - tourai-net
 
+  # ===========================================================================
+  # App — tour-agent FastAPI 服务
+  # ===========================================================================
+  app:
+    build: .
+    container_name: tourai-app
+    depends_on:
+      milvus:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      kafka:
+        condition: service_healthy
+      mysql:
+        condition: service_healthy
+    env_file:
+      - .env
+    environment:
+      - MILVUS_HOST=milvus
+      - MILVUS_PORT=19530
+      - REDIS_URL=redis://redis:6379/0
+      - KAFKA_BOOTSTRAP_SERVERS=kafka:9092
+      - MYSQL_URL=mysql://tourai:tourai123@mysql:3306/tourai
+    ports:
+      - "8000:8000"
+    networks:
+      - tourai-net
+    restart: unless-stopped
+
 # =============================================================================
 # Volumes
 # =============================================================================
-
 volumes:
   etcd_data:
   minio_data:
@@ -209,7 +221,6 @@ volumes:
 # =============================================================================
 # Networks
 # =============================================================================
-
 networks:
   tourai-net:
     driver: bridge

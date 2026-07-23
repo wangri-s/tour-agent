@@ -13,11 +13,13 @@ async def session_context(state: OverallState) -> PartialState:
     updates: PartialState = {}
 
     # ---- 语言兜底 ----
-    if not state.language:
+    lang = state.get("language", "") if isinstance(state, dict) else state.language
+    if not lang:
         updates["language"] = "zh"
 
     # ---- 会话 ID 兜底 ----
-    if not state.session_id:
+    sid = state.get("session_id", "") if isinstance(state, dict) else state.session_id
+    if not sid:
         import uuid
         updates["session_id"] = str(uuid.uuid4())
 

@@ -32,9 +32,10 @@ class CustomerServiceAgent(BaseAgent):
             }
         """
 
+        msgs = state.get("messages", []) if isinstance(state, dict) else state.messages
         recent = [
             {"role": m.type if hasattr(m, "type") else "assistant", "content": m.content}
-            for m in state.messages[-10:]
+            for m in msgs[-10:]
         ]
 
         result = await self.call_llm(recent, tools=self.tools)

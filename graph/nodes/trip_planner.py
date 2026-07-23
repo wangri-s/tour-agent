@@ -23,15 +23,17 @@ async def trip_planner(state: OverallState) -> PartialState:
     # 更新 draft
     draft = result.get("draft")
     if draft is not None:
+        sd = state.get("draft") if isinstance(state, dict) else state.draft
         # 首次生成 version += 1
-        if not state.draft.itinerary_md:
-            draft.version = state.draft.version + 1
-        else:
-            draft.version = state.draft.version  # 追问不增加版本
+        if sd and not (sd.itinerary_md if hasattr(sd, "itinerary_md") else sd.get("itinerary_md", "")):
+            draft.version = (sd.version if hasattr(sd, "version") else sd.get("version", 0)) + 1
+        elif sd:
+            draft.version = sd.version if hasattr(sd, "version") else sd.get("version", 0)
 
+    sn = state.get("need") if isinstance(state, dict) else state.need
     return {
         "draft": draft,
-        "need": result.get("need", state.need),
+        "need": result.get("need", sn),
         "final_reply": result.get("reply", ""),
         "messages": result.get("messages", []),
     }

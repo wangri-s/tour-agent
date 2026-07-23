@@ -31,9 +31,12 @@ class QuoteAgent(BaseAgent):
             }
         """
 
+        s = state if isinstance(state, dict) else state.__dict__ if hasattr(state, '__dict__') else {}
+        need = s.get("need") if isinstance(s, dict) else state.need
+        draft = s.get("draft") if isinstance(s, dict) else state.draft
         context = {
-            "need": state.need.model_dump(),
-            "draft": state.draft.model_dump(),
+            "need": need.model_dump() if hasattr(need, "model_dump") else need,
+            "draft": draft.model_dump() if hasattr(draft, "model_dump") else draft,
         }
 
         messages = [

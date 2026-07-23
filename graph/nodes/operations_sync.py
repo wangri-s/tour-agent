@@ -2,9 +2,17 @@
 
 from __future__ import annotations
 
+from typing import Any
 from graph.state import OverallState, PartialState
 from tools.update_crm import update_crm
 from tools.send_capi import send_capi
+
+
+def _g(state: Any, key: str, default: Any = None) -> Any:
+    """安全获取 State 字段"""
+    if isinstance(state, dict):
+        return state.get(key, default)
+    return getattr(state, key, default)
 
 
 async def operations_sync(state: OverallState) -> PartialState:
@@ -17,14 +25,16 @@ async def operations_sync(state: OverallState) -> PartialState:
 
     # CRM 写入
     try:
+        need = _g(state, "need")
+        draft = _g(state, "draft")
         await update_crm.ainvoke({
-            "customer_id": state.customer_id,
-            "channel": state.channel,
-            "need": state.need.model_dump(),
-            "draft": state.draft.model_dump(),
-            "intent_level": state.intent_level,
-            "revision_count": state.revision_count,
-            "final_reply": state.final_reply,
+            "customer_id": _g(state, "customer_id", ""),
+            "channel": _g(state, "channel", ""),
+            "need": need.model_dump() if hasattr(need, "model_dump") else need,
+            "draft": draft.model_dump() if hasattr(draft, "model_dump") else draft,
+            "intent_level": _g(state, "intent_level", ""),
+            "revision_count": _g(state, "revision_count", 0),
+            "final_reply": _g(state, "final_reply", ""),
         })
     except Exception:
         pass  # 非阻断
@@ -33,10 +43,10 @@ async def operations_sync(state: OverallState) -> PartialState:
     try:
         await send_capi.ainvoke({
             "event": "session_completed",
-            "customer_id": state.customer_id,
-            "channel": state.channel,
-            "branch": state.current_branch,
-            "intent_level": state.intent_level,
+            "customer_id": _g(state, "customer_id", ""),
+            "channel": _g(state, "channel", ""),
+            "branch": _g(state, "current_branch", ""),
+            "intent_level": _g(state, "intent_level", ""),
         })
     except Exception:
         pass  # 非阻断

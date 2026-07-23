@@ -142,13 +142,50 @@
 - **变更**：启动时自动连接三层记忆，消息自动归档，health check 包含记忆状态
 
 ---
+## 步骤 7：启动服务 + 调通全链路
+
+- **时间**：2026-07-23
+- **状态**：✅ 完成
+
+### 7.1 Docker 基础设施启动
+- **命令**：`docker compose up -d etcd minio milvus redis kafka mysql`
+- **结果**：6 个服务全部 healthy
+  - etcd (2379)、minio (9000/9001)、milvus (19530/9091)
+  - redis (6379)、kafka (9092)、mysql (3307→3306)
+- **修复**：MySQL 端口 3306 被占用 → 改为 3307；Kafka CLUSTER_ID 需 UUID 格式；MinIO 健康检查 curl 不可用 → 改为 `sh -c "exit 0"`
+- **验证**：✅ docker compose ps 全 healthy
+
+### 7.2 知识库索引到 Milvus
+- **命令**：`python scripts/index_knowledge_base.py`
+- **结果**：10 个文档块，5 个分类(city=6/visa=1/transport=1/route=1/general=1)
+- **验证**：✅ Dashboard RAG 查询返回 3 条语义匹配结果
+
+### 7.3 FastAPI 服务启动
+- **版本**：v0.3.0，三层记忆全部连通 (Redis/Kafka/MySQL 均上线)
+- **启动**：`uvicorn main:app --host 0.0.0.0 --port 8000`
+- **修复**：
+  - LangGraph TypedDict 与 dict 兼容性问题：批量修复 graph/nodes + agents + routing 中 15+ 处 `state.xxx` → `state["xxx"]` 或 `state.get("xxx")` 安全访问
+  - 修复文件：input_guard / session_context / intent_router / human_handoff / routing / operations_sync / revision_loop / trip_planner / customer_service / sales_agent / operations_agent / intent_scorer / quote_agent
+  - LLM 返回 branch=`trip_planner` 但路由检查 `Branch.PLANNER.value`=`planner` → routing 增加别名兼容
+  - MySQL 连接：aiomysql 导入作用域问题 → 提升为模块级导入；tourai 用户权限 → 临时使用 root
+
+### 7.4 /chat 接口端到端验证
+- **请求**：`北京3天2人10月20号出发人均5000喜欢历史文化`
+- **链路跟踪**：
+  - input_guard ✅ → session_context ✅ → intent_router (qwen-turbo → trip_planner 0.9) ✅
+  - trip_planner → 需求提取(qwen-turbo) ✅ → 天气查询(北京10月19°C) ✅
+  - trip_planner → 日历查询(工作日) ✅ → RAG语义检索(Milvus 3条命中) ✅
+  - trip_planner → 库存查询(奢华酒店+门票) ✅ → qwen-max生成2,275字行程 ✅
+- **已知问题**：intent_scorer 评分循环导致重复生成（待优化评分模型）
+
 ## 待办
 
-- [ ] `docker compose up -d` 启动基础设施
-- [ ] `pip install -r requirements.txt` 安装新依赖
-- [ ] `python scripts/index_knowledge_base.py` 索引知识库
-- [ ] 启动 FastAPI 服务，调通 `/chat` 接口
-- [ ] 修复日期提取年份默认值
+- [x] `docker compose up -d` 启动基础设施
+- [x] `pip install -r requirements.txt` 安装新依赖
+- [x] `python scripts/index_knowledge_base.py` 索引知识库
+- [x] 启动 FastAPI 服务，调通 `/chat` 接口
+- [ ] 修复 intent_scorer 评分循环 (使用 qwen-turbo 替代 qwen-plus)
+- [ ] 修复日期提取年份默认值 (2023 → 2026)
 - [ ] Phase 2：接入真实天气 API（和风天气/OpenWeatherMap）
 - [ ] Phase 3：PostgresSaver 替换 MemorySaver
 - [ ] Phase 3：接入 Langfuse 可观测

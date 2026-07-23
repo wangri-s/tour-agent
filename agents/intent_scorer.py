@@ -30,11 +30,15 @@ class IntentScorerAgent(BaseAgent):
             }
         """
 
+        s = state if isinstance(state, dict) else state.__dict__ if hasattr(state, '__dict__') else {}
+        need = s.get("need") if isinstance(s, dict) else state.need
+        draft = s.get("draft") if isinstance(s, dict) else state.draft
+        msgs = s.get("messages", []) if isinstance(s, dict) else state.messages
         context = {
-            "need": state.need.model_dump(),
-            "draft": state.draft.model_dump(),
-            "revision_count": state.revision_count,
-            "last_message": state.messages[-1].content if state.messages else "",
+            "need": need.model_dump() if hasattr(need, "model_dump") else need,
+            "draft": draft.model_dump() if hasattr(draft, "model_dump") else draft,
+            "revision_count": s.get("revision_count", 0) if isinstance(s, dict) else state.revision_count,
+            "last_message": msgs[-1].content if msgs else "",
         }
 
         messages = [

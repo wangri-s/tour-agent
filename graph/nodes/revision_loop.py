@@ -11,4 +11,5 @@ async def revision_loop(state: OverallState) -> PartialState:
     硬上限 3 次，由 routing.revision_decision 条件边控制。
     """
 
-    return {"revision_count": state.revision_count + 1}
+    rc = state.get("revision_count", 0) if isinstance(state, dict) else state.revision_count
+    return {"revision_count": rc + 1}

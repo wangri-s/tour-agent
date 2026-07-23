@@ -23,6 +23,11 @@ import logging
 from typing import Any
 from datetime import datetime
 
+try:
+    import aiomysql
+except ImportError:
+    aiomysql = None  # type: ignore
+
 logger = logging.getLogger(__name__)
 
 
@@ -47,7 +52,6 @@ class MySQLStore:
     async def connect(self) -> bool:
         """建立 MySQL 连接池"""
         try:
-            import aiomysql
             from urllib.parse import urlparse
 
             parsed = urlparse(self.dsn)
@@ -98,7 +102,7 @@ class MySQLStore:
 
     async def _fetch(self, sql: str, params: tuple | None = None) -> list[dict[str, Any]]:
         """执行查询，返回 dict 列表"""
-        if not self._pool:
+        if not self._pool or aiomysql is None:
             return []
         try:
             async with self._pool.acquire() as conn:
@@ -532,5 +536,3 @@ class MySQLStore:
 
 mysql_store = MySQLStore()
 
-# 延迟导入避免循环依赖
-import aiomysql as _aiomysql

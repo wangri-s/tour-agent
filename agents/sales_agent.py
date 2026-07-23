@@ -38,7 +38,7 @@ class SalesAgent(BaseAgent):
 
         recent = [
             {"role": m.type if hasattr(m, "type") else "assistant", "content": m.content}
-            for m in state.messages[-10:]
+            for m in (state.get("messages", []) if isinstance(state, dict) else state.messages)[-10:]
         ]
 
         result = await self.call_llm(recent, tools=self.tools)

@@ -147,6 +147,25 @@ async def chat(req: ChatRequest):
         logger.exception("Graph invocation failed")
         raise HTTPException(status_code=500, detail=str(e))
 
+    # 构造响应 (先构造，再保存记忆)
+    draft_dict = None
+    raw_draft = result.get("draft")
+    if raw_draft:
+        md = raw_draft.itinerary_md if hasattr(raw_draft, "itinerary_md") else raw_draft.get("itinerary_md", "")
+        if md:
+            draft_dict = {
+                "version": raw_draft.version if hasattr(raw_draft, "version") else raw_draft.get("version", 0),
+                "itinerary_md": md,
+                "estimated_cost": raw_draft.estimated_cost if hasattr(raw_draft, "estimated_cost") else raw_draft.get("estimated_cost", 0),
+                "weather_summary": raw_draft.weather_summary if hasattr(raw_draft, "weather_summary") else raw_draft.get("weather_summary", ""),
+                "highlights": raw_draft.highlights if hasattr(raw_draft, "highlights") else raw_draft.get("highlights", []),
+            }
+
+    quote_dict = None
+    raw_quote = result.get("quote")
+    if raw_quote:
+        quote_dict = raw_quote.model_dump() if hasattr(raw_quote, "model_dump") else raw_quote
+
     # 保存 AI 回复到三层记忆
     if _memory and result.get("final_reply"):
         branch = result.get("current_branch", "")
@@ -159,7 +178,6 @@ async def chat(req: ChatRequest):
             language=req.language,
             branch=branch,
         )
-        # 记录 Agent 事件
         await _memory.remember_event(
             event_type="response_generated",
             session_id=req.session_id,
@@ -171,21 +189,6 @@ async def chat(req: ChatRequest):
                 "has_quote": bool(quote_dict),
             },
         )
-
-    # 构造响应
-    draft_dict = None
-    if result.get("draft") and result["draft"].itinerary_md:
-        draft_dict = {
-            "version": result["draft"].version,
-            "itinerary_md": result["draft"].itinerary_md,
-            "estimated_cost": result["draft"].estimated_cost,
-            "weather_summary": result["draft"].weather_summary,
-            "highlights": result["draft"].highlights,
-        }
-
-    quote_dict = None
-    if result.get("quote"):
-        quote_dict = result["quote"].model_dump()
 
     logger.info(
         f"[API] {req.session_id} → branch={result.get('current_branch')}, "

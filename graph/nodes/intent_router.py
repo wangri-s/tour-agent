@@ -22,7 +22,8 @@ async def intent_router(state: OverallState) -> PartialState:
     3. 最高概率 < 0.3 → 兜底进入客服
     """
 
-    last_msg = state.messages[-1] if state.messages else None
+    msgs = state.get("messages", []) if isinstance(state, dict) else state.messages
+    last_msg = msgs[-1] if msgs else None
     if last_msg is None:
         return {"current_branch": Branch.SERVICE.value}
 
