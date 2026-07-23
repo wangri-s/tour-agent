@@ -15,12 +15,13 @@
       </div>
 
       <div v-for="(m, i) in store.messages" :key="i"
-           :class="['msg', m.role]">
+           :class="['msg', m.role, { streaming: m.streaming }]">
         <div class="avatar">{{ m.role === 'user' ? '👤' : m.role === 'system' ? '⚠️' : '🤖' }}</div>
-        <div class="bubble" v-html="renderContent(m.content)"></div>
+        <div class="bubble" v-html="renderContent(m.content) + (m.streaming ? '▊' : '')"></div>
       </div>
 
-      <div v-if="store.loading" class="msg assistant">
+      <!-- 初始加载：还没有 streaming 消息时的占位动画 -->
+      <div v-if="store.loading && !store.messages.find(m => m.streaming)" class="msg assistant">
         <div class="avatar">🤖</div>
         <div class="bubble typing">
           <span></span><span></span><span></span>
@@ -180,4 +181,13 @@ watch(() => store.messages.length, async () => {
   border-radius: 50%; animation: spin .6s linear infinite;
 }
 @keyframes spin { to { transform: rotate(360deg); } }
+
+/* 流式输出光标闪烁 */
+.msg.streaming .bubble {
+  border-left: 2px solid #6677cc;
+}
+@keyframes blink {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0; }
+}
 </style>

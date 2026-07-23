@@ -1,7 +1,4 @@
-"""报价 Agent —— 基于 draft 与 need 生成结构化报价单 (工具调用修复版)
-
-修复: 当 LLM 调用 quote_price 工具时，使用 chat_with_tools 自动执行工具并获取最终回复。
-"""
+"""报价 Agent —— 基于 draft 与 need 生成结构化报价单 (v2: 国内/入境自适应)"""
 
 from __future__ import annotations
 
@@ -17,7 +14,7 @@ logger = logging.getLogger(__name__)
 
 
 class QuoteAgent(BaseAgent):
-    """生成分项报价：机票、酒店、交通、门票、餐饮、导游"""
+    """生成分项报价：大交通、酒店、交通、门票、餐饮、导游"""
 
     def __init__(self):
         super().__init__(name="quote_agent")
@@ -39,14 +36,27 @@ class QuoteAgent(BaseAgent):
         need_data = need.model_dump() if hasattr(need, "model_dump") else (need.dict() if hasattr(need, "dict") else need)
         draft_data = draft.model_dump() if hasattr(draft, "model_dump") else (draft.dict() if hasattr(draft, "dict") else draft)
 
-        # 根据 draft 的 estimated_cost 拆分为分项报价
         total = draft_data.get("estimated_cost", 0) if isinstance(draft_data, dict) else getattr(draft, "estimated_cost", 0)
         days = need_data.get("days", 0) if isinstance(need_data, dict) else getattr(need, "days", 0)
         pax = need_data.get("pax", 1) if isinstance(need_data, dict) else getattr(need, "pax", 1)
 
-        # 直接基于已有数据计算报价，不依赖 LLM tool call
-        hotel_per_night = total * 0.35 / max(days, 1)
-        flights = total * 0.30
+        # 检测入境/国内：查找费用表中大交通那一行的内容
+        itinerary = draft_data.get("itinerary_md", "") if isinstance(draft_data, dict) else getattr(draft, "itinerary_md", "")
+        is_international = False
+        for raw_line in itinerary.split("\n"):
+            s = raw_line.strip()
+            # 大交通行都在表格中，以 | 开头且含「大交通」
+            if s.startswith("|") and "大交通" in s:
+                is_international = "国际机票" in s or "国际航班" in s
+                logger.info(f"[QuoteAgent] 大交通行: {s[:120]} → international={is_international}")
+                break
+
+        # 默认国内游：大交通 15%，酒店 50%
+        # 入境游：国际机票 30%，酒店 35%
+        flight_ratio = 0.30 if is_international else 0.15
+        hotel_ratio = 0.35 if is_international else 0.50
+        hotel_per_night = total * hotel_ratio / max(days, 1)
+        flights = total * flight_ratio
         transport = total * 0.10
         tickets = total * 0.10
         meals = total * 0.10
@@ -64,12 +74,13 @@ class QuoteAgent(BaseAgent):
             notes="基于行程草案的预估报价，实际价格以预订时为准。4人以上可享团购优惠。",
         )
 
-        # 生成友好的报价回复
+        transport_label = "✈️ 国际机票" if is_international else "🚄 高铁/动车"
+
         reply = (
             f"📊 **报价单**\n\n"
             f"| 项目 | 人均费用 |\n"
             f"|------|----------|\n"
-            f"| ✈️ 国际机票 | ¥{quote.flights:,} |\n"
+            f"| {transport_label} | ¥{quote.flights:,} |\n"
             f"| 🏨 酒店({days}晚) | ¥{quote.hotels:,} |\n"
             f"| 🚗 市内交通 | ¥{quote.transport:,} |\n"
             f"| 🎫 景点门票 | ¥{quote.tickets:,} |\n"
@@ -80,7 +91,8 @@ class QuoteAgent(BaseAgent):
             f"满意此报价吗？回复「确认」即可进入下一步。"
         )
 
-        logger.info(f"[QuoteAgent] 生成报价: ¥{quote.total:,}/人")
+        print(f"[QUOTE-V2] international={is_international} flights={quote.flights} hotels={quote.hotels} total={quote.total}", flush=True)
+        logger.info(f"[QuoteAgent] 生成报价: ¥{quote.total:,}/人 (international={is_international})")
 
         return {
             "quote": quote,

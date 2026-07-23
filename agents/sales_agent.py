@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from agents.base import BaseAgent
+from agents.base import BaseAgent, _normalize_role
 from prompts.sales_agent import SALES_AGENT_PROMPT
 from graph.state import OverallState, IntentLevel
 from tools.quote_price import quote_price
@@ -37,12 +37,12 @@ class SalesAgent(BaseAgent):
         """
 
         recent = [
-            {"role": m.type if hasattr(m, "type") else "assistant", "content": m.content}
+            {"role": _normalize_role(m), "content": m.content}
             for m in (state.get("messages", []) if isinstance(state, dict) else state.messages)[-10:]
         ]
 
-        result = await self.call_llm(recent, tools=self.tools)
-        content = result.get("content", "")
+        result = await self.call_llm_stream(recent, tools=self.tools)
+        content = result  # call_llm_stream 返回完整文本
 
         # ---- 简易意向评分 ----
         intent_level = self._score_intent(content)

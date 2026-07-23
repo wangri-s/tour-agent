@@ -204,6 +204,496 @@
 - **消费者组** `tour-agent-memory` 正常 join/consume
 - **生产者/消费者** 均正常，Kafka→MySQL 事件桥接已注册
 
+## 步骤 9：前后端打通 + Role 标准化 + 国内游修复 + 前端持久化
+
+- **时间**：2026-07-22
+- **状态**：✅ 完成
+
+### 9.1 端口与 IPv6 修复
+- **问题**：Windows `localhost` 解析为 IPv6 `::1`，Python 后端只监听 IPv4，导致 Vite proxy 连接拒绝
+- **修复**：`vite.config.js` proxy target 改为 `127.0.0.1:8002`（强制 IPv4）
+- **端口演进**：8000 → 8001 → 8002（zombie uvicorn 进程占坑）
+- **结论**：Windows 上关闭 `reload=True`，避免子进程日志丢失 + 孤儿端口
+
+### 9.2 LLM Role 标准化（HumanMessage → "user"）
+- **问题**：LangChain `HumanMessage.type = "human"`，DashScope API 只接受 `"user"` → 400 Bad Request
+- **修复**：双层防御
+  - `agents/base.py`：`_normalize_role()` 函数，`human→user, ai→assistant`
+  - `services/llm_gateway.py`：`chat()` 入口统一 normalize，兜底所有代码路径
+- **影响文件**：`llm_gateway.py`, `agents/base.py`, `customer_service.py`, `sales_agent.py`, `operations_agent.py`, `trip_planner.py`
+
+### 9.3 国内游不再出现"国际机票"
+- **问题**：国内出发（如 山西→北京），行程草案仍列出 ✈️国际机票
+- **修复**：
+  - `prompts/trip_planner.py`：大交通判断规则 + 模板改为 `🚄 大交通`
+  - `agents/trip_planner.py`：`_build_generation_prompt()` 增加 `⚠️ 国内出发严禁国际机票` 约束
+  - `agents/quote_agent.py`：**完全重写** — 动态检测 itinerary 中的交通类型
+    - 扫描费用表行 `|...大交通...|`，含"国际机票" → international
+    - 国内：15% 高铁 + 50% 酒店；国际：30% 机票 + 35% 酒店
+    - 标签动态："🚄 高铁/动车" vs "✈️ 国际机票"
+
+### 9.4 前端 localStorage 持久化
+- **问题**：刷新页面 sessionId 丢失，"记忆功能没法用"
+- **修复**：`frontend/src/stores/chat.js`
+  - sessionId / customerId / channel / language 写入 localStorage
+  - `watch()` 自动同步变更 → 刷新不丢失
+
+### 9.5 对话历史侧边栏 (HistorySidebar)
+- **新增**：`frontend/src/components/HistorySidebar.vue`
+- **功能**：新对话、会话列表（标题+日期+条数+费用+branch标签）、点击切换、删除、折叠/展开
+- **布局**：`[Sidebar 280/44px] [ChatPanel] [DetailPanel]`
+- **元数据**：自动保存首条用户消息为标题（截断30字），branch 映射为中文标签
+- **限制**：最多 50 条会话
+
+---
+
+## 步骤 10：流式输出 (SSE Streaming)
+
+- **时间**：2026-07-23
+- **状态**：✅ 完成
+
+### 10.1 架构设计
+```
+浏览器 ←─ SSE (text/event-stream) ──→ /chat/stream
+                                         │
+                                    asyncio.Queue (ContextVar)
+                                         │
+                              ┌──────────┴──────────┐
+                         event_generator()    run_graph() 后台
+                              (SSE 推送)      (LangGraph.ainvoke)
+                                                   │
+                                         agents 推送 ("token", text)
+```
+
+### 10.2 后端新增/修改
+- **新增** `services/stream_context.py`：ContextVar 传递 asyncio.Queue，agent 无需改签名即可推送 token
+- **修改** `services/llm_gateway.py`：`chat_stream()` — OpenAI `stream=True` 异步生成器，逐 token yield
+- **修改** `agents/base.py`：`call_llm_stream()` — 调 `chat_stream()` 并推送到 stream queue
+- **修改** 四个 Agent：
+  - `agents/trip_planner.py`：主 LLM 调用改为 `call_llm_stream()`（行程 Markdown 逐字生成）
+  - `agents/customer_service.py`：`handle()` 改为 `call_llm_stream()`
+  - `agents/sales_agent.py`：`handle()` 改为 `call_llm_stream()`
+  - `agents/operations_agent.py`：`handle()` 改为 `call_llm_stream()`
+- **修改** `main.py`：新增 `POST /chat/stream` SSE 端点
+  - 事件类型：`token`（文本片段）、`branch`（路由分支）、`draft`（行程JSON）、`quote`（报价JSON）、`reply`（兜底全文）、`done`（结束）、`error`（错误）
+
+### 10.3 前端新增/修改
+- **修改** `frontend/src/api/index.js`：`sendMessageStream()` — fetch + ReadableStream + SSE 解析
+- **修改** `frontend/src/stores/chat.js`：`send()` 改为流式
+  - 先 push 空 assistant 占位消息 → `onToken` 逐字填充 `messages[i].content` → `onDone` 结束
+  - `onDraft`/`onQuote`/`onBranch` 更新右侧面板
+- **修改** `frontend/src/components/ChatPanel.vue`：流式消息显示 `▊` 闪烁光标 + 蓝色左边框
+- **修改** `frontend/vite.config.js`：新增 `/chat/stream` proxy
+
+---
+
+## 步骤 11：对话历史记录持久化修复
+
+- **时间**：2026-07-23
+- **状态**：✅ 完成
+
+### 问题
+`saveCurrentSession()` 只保存了元数据（标题、日期、条数）到 `tourai_sessions`，**消息内容从未持久化**。点击侧边栏历史会话后，`switchSession()` 只清空消息 + 改 sessionId，不恢复任何数据。
+
+### 修复
+- **新增** `loadSessionData(id)` / `saveSessionData(id, data)` / `removeSessionData(id)` — 每会话独立 localStorage key：`tourai_session_data_{id}`
+- **修改** `saveCurrentSession()`：每次保存时同步写入完整消息数组 + draft + quote + branch
+- **修改** `switchSession(id)`：先保存当前 → 切换 → 从 localStorage 恢复目标会话的 messages / draft / quote / branch
+- **修改** `deleteSession(id)`：同时清理 `removeSessionData(id)`
+- **新增** 启动初始化块：页面刷新后自动恢复当前 sessionId 的消息
+
+### 数据流
+```
+发送消息 → onDone → saveCurrentSession()
+                     ├─ 元数据 → tourai_sessions (侧边栏)
+                     └─ 消息体 → tourai_session_data_{id} (切换/刷新恢复)
+
+点击历史 → switchSession(id)
+           ├─ saveCurrentSession()  (存当前)
+           ├─ clearChat()
+           └─ loadSessionData(id)   (恢复)
+```
+
+---
+
+## 步骤 12：意图路由修复（四个 Agent 精准分发）
+
+- **时间**：2026-07-23
+- **状态**：✅ 完成
+
+### 问题 1："商家入驻"误路由到 service
+- **根因**：`prompts/intent_router.py` 的 operations 关键词只含"订单/取消/退款"，不含"入驻/商家"
+- **修复**：扩充 operations 关键词 + 新增少量示例 6（商家入驻 → operations）
+
+### 问题 2："退款"被强制转人工而非走运营
+- **根因**：`graph/nodes/intent_router.py` 的 `HUMAN_HANDOFF_KEYWORDS` 列表包含 `"退款"` — 在 LLM 路由之前就被拦截 → `need_human=True + branch=service`
+- **修复**：从关键词列表移除 `"退款"` 和 `"refund"`。退款应走 operations agent 处理，只有"投诉/差评/叫经理"才直接转人工
+
+### 问题 3：路由 prompt 边界模糊
+- **修复**：`prompts/intent_router.py` 完全重写
+  - 12 个 few-shot 示例（原 7 个），覆盖 planner/sales/operations/service 四种场景
+  - 8 条优先级规则链（严格按顺序，命中即停）
+  - 关键区分规则：
+    - **查订单 vs 改订单**：仅查询 → service；取消/修改/退款 → operations
+    - **景点推荐 vs FAQ**："XX有什么好玩的" → planner；"故宫几点开门" → service
+    - **预算描述 vs 询价**："预算5000" → planner；"多少钱/优惠" → sales
+    - **商家一律 → operations**
+    - **含取消/修改/退款动作词 → operations**（即使是问句也优先判为操作请求）
+
+### 验证
+8 条测试全部通过：
+```
+取消+退款 → operations ✅
+退款诉求   → operations ✅
+仅查订单   → service    ✅
+改期       → operations ✅
+行程规划   → planner    ✅
+询价       → sales      ✅
+商家入驻   → operations ✅
+投诉       → service    ✅
+```
+
+---
+
+## 步骤 13：三层记忆系统详解
+
+- **时间**：2026-07-22
+- **状态**：✅ 完成
+
+### 13.1 架构总览
+```
+┌─────────────────────────────────────────────────────┐
+│              MemoryOrchestrator (编排器)              │
+│                                                     │
+│  ┌───────────────┐  ┌──────────────┐  ┌───────────┐ │
+│  │ ShortTerm     │  │ Working      │  │ LongTerm  │ │
+│  │ Memory (Redis)│  │ Memory(Kafka)│  │ Memory    │ │
+│  │               │  │              │  │ (MySQL)   │ │
+│  │ 会话上下文     │  │ Agent 事件    │  │ 消息归档   │ │
+│  │ 客户热缓存     │  │ 异步任务      │  │ 客户画像   │ │
+│  │ 频率限制       │  │ CRM/CAPI     │  │ 行程CRUD   │ │
+│  │ 工具缓存       │  │ 分析埋点      │  │ 事件持久   │ │
+│  │ TTL: 5min-24h │  │ 保留7天       │  │ 永久       │ │
+│  └───────────────┘  └──────────────┘  └───────────┘ │
+└─────────────────────────────────────────────────────┘
+```
+
+### 13.2 读取策略 (L1 → L2 自动回填)
+1. 先查 Redis（短时记忆）→ 命中直接返回
+2. miss → 查 MySQL（长时记忆）
+3. MySQL 有 → 回填 Redis 热缓存
+4. MySQL 无 → 返回空/默认值
+
+### 13.3 写入策略 (L1 即时 → L2 事件 → L3 持久)
+1. 立即写 Redis（设置 TTL）
+2. 发布 Kafka 事件（异步处理）
+3. Kafka Consumer → 写入 MySQL（持久化归档）
+
+### 13.4 短时记忆层 (ShortTermMemory)
+- **文件**：`services/memory/short_term.py` (184行)
+- **存储**：Redis
+- **数据结构**：
+  - `tourai:session:{id}:messages` — List，保留最近 50 条
+  - `tourai:session:{id}:context` — Hash，当前 need/draft/branch
+  - `tourai:customer:{id}:profile` — Hash，客户画像热缓存 (24h TTL)
+  - `tourai:ratelimit:{id}` — String，滑动窗口计数器
+  - `tourai:agent:{session}:{agent}` — Hash，Agent 临时工作状态 (5min TTL)
+  - `tourai:tool:{name}:{args_hash}` — String，工具结果缓存 (10min TTL)
+- **功能**：会话上下文管理、客户画像热缓存、频率限制、Agent 状态暂存、工具结果缓存、分布式锁
+
+### 13.5 工作记忆层 (WorkingMemory)
+- **文件**：`services/memory/working.py` (162行)
+- **存储**：Kafka (7 Topic)
+- **Topic 设计**：
+  - `agent-events` (3分区) — Agent 事件流
+  - `trip-tasks` (3分区) — 行程生成任务
+  - `crm-sync` — CRM 同步队列
+  - `capi-send` — 广告转化回传
+  - `analytics` — 分析埋点
+  - `notifications` — 通知发送
+- **事件类型 (12种)**：intent_detected, trip_generated, trip_accepted, quote_created, human_handoff, error_occurred 等
+- **功能**：Agent 事件发布/订阅、CRM 同步、CAPI 回传、通知发送、分析埋点、异步任务入队
+
+### 13.6 长时记忆层 (LongTermMemory)
+- **文件**：`services/memory/long_term.py` (185行)
+- **存储**：MySQL (6 张表)
+- **数据表**：
+  - `conversations` — 会话消息归档
+  - `customer_profiles` — 客户画像
+  - `trips` — 行程记录
+  - `agent_events` — Agent 事件持久备份
+  - `faq_feedback` — RAG 质量反馈
+  - `knowledge_docs` — 知识库元数据
+- **功能**：消息归档、客户画像 CRUD、行程 CRUD、事件持久备份、RAG 质量统计
+
+### 13.7 编排器 (MemoryOrchestrator)
+- **文件**：`services/memory/orchestrator.py` (354行)
+- **统一接口**：`remember_message()`, `recall_context()`, `remember_customer()`, `recall_customer()`, `remember_trip()`, `remember_event()`, `remember_rag_feedback()`
+- **事件桥接**：Kafka Consumer → MySQL agent_events 表自动持久化
+- **生命周期**：`startup()` 连接所有服务 (非阻断) → `shutdown()` 安全关闭
+- **特性**：各层独立连接，单层故障不阻断其他层
+
+---
+
+## 步骤 14：上下文压缩 / 查询改写
+
+- **时间**：2026-07-22
+- **状态**：✅ 完成
+
+### 14.1 设计动机
+- 长对话（>30轮）直接送入 LLM 会超出 token 限制（DashScope qwen-max 8K context）
+- 历史消息中的中间追问、确认等对话噪声稀释关键信息
+- 需要保留客户需求的核心信息：目的地、日期、人数、预算、偏好
+
+### 14.2 压缩策略
+- **文件**：`services/context_compressor.py` (180行)
+- **三层窗口**：
+  - **近期窗口 (10轮)**：完整保留，不做任何修改
+  - **中期窗口 (10-30轮)**：LLM 生成渐进式摘要（≤300字）
+  - **长期窗口 (>30轮)**：关键信息提取（目的地/预算/偏好/变更/情绪）
+- **Token 估算**：中文 ~1.5 字符/token，硬上限默认 6000 tokens
+- **摘要合并**：累积摘要自动合并（新+旧 → LLM 合成一段）
+
+### 14.3 摘要 Prompt 设计
+```
+关键信息类别:
+1. 客户需求: 目的地、日期、人数、预算、偏好
+2. 已确认信息: 哪些需求已确认
+3. 待确认信息: 还有什么需要确认
+4. 行程变更: 客户要求过什么修改
+5. 情绪变化: 客户满意度变化
+```
+
+### 14.4 降级策略
+- LLM 可用 → 调用 qwen-turbo 生成智能摘要
+- LLM 不可用 → 关键词规则摘要（匹配"目的地/天数/预算/日期/人数"等关键词行）
+- 无需压缩（估算 tokens ≤ 阈值）→ 直接返回原始消息
+
+### 14.5 集成位置
+- `main.py` `/chat` 和 `/chat/stream` 两个端点均在调用 graph 之前执行压缩
+- 压缩结果注入为 `[system]` 消息（`[历史对话摘要]\n{summary}`）
+
+---
+
+## 步骤 15：前端完整组件体系
+
+- **时间**：2026-07-22 ~ 2026-07-23
+- **状态**：✅ 完成
+
+### 15.1 技术栈
+- Vue 3 (Composition API + `<script setup>`)
+- Pinia (状态管理)
+- Vite (构建工具 + HMR + proxy)
+- marked (Markdown → HTML 渲染)
+- CSS Scoped (暗色主题 #0e0e18 基调)
+
+### 15.2 项目结构
+```
+frontend/src/
+├── main.js                      # 入口: createApp + Pinia
+├── App.vue                      # 根布局: [Sidebar] [Chat] [Detail]
+├── api/
+│   └── index.js                 # API 层: fetch + SSE ReadableStream
+├── stores/
+│   └── chat.js                  # 全局状态: 消息/会话/草稿/报价/流式
+└── components/
+    ├── StatusBar.vue            # 顶栏: 服务状态 + RAG/COT/Redis/MySQL 标签
+    ├── HistorySidebar.vue       # 左侧: 对话历史列表
+    ├── ChatPanel.vue            # 中央: 消息列表 + 输入区
+    ├── DraftCard.vue            # 右侧: 行程草案 Markdown 渲染
+    ├── QuoteTable.vue           # 右侧: 报价单分项表格 + 进度条
+    └── SettingsPanel.vue        # 弹窗: 会话ID/客户ID/渠道/语言设置
+```
+
+### 15.3 StatusBar（顶栏状态）
+- **文件**：`frontend/src/components/StatusBar.vue` (48行)
+- **功能**：服务在线/离线指示（绿点脉冲动画）、版本号、功能标签（RAG/COT）
+- **记忆层标签**：Redis/MySQL 连接状态（绿=connected, 红=disconnected）
+- **初始化**：`onMounted` 自动调用 `/health` 刷新
+
+### 15.4 HistorySidebar（对话历史侧边栏）
+- **文件**：`frontend/src/components/HistorySidebar.vue` (216行)
+- **功能**：
+  - "新对话" 按钮
+  - 历史列表（标题截断30字、日期、消息条数、费用 ¥badge、branch 中文标签）
+  - 当前活跃会话高亮（蓝色边框+文字）
+  - 每项可删除（✕ 按钮）
+  - 折叠/展开（280px ↔ 44px），折叠时显示圆形计数 badge
+- **Branch 中文映射**：planner→🏖️行程, service→💬客服, sales→💰销售, operations→📋运营
+
+### 15.5 ChatPanel（聊天面板）
+- **文件**：`frontend/src/components/ChatPanel.vue` (195行)
+- **功能**：
+  - 欢迎页（4 个快捷按钮：北京/成都/西安/桂林）
+  - 消息气泡（用户蓝色右对齐 / AI 暗色左对齐 / 系统红色居中）
+  - Markdown 渲染（表格/标题/粗体/代码块/引用块）
+  - 流式显示（`▊` 闪烁光标 + 蓝色左边框动画）
+  - 加载占位（三点跳动动画）
+  - 输入区（圆角输入框 + 渐变发送按钮）
+  - 自动滚到底部
+
+### 15.6 DraftCard（行程草案卡片）
+- **文件**：`frontend/src/components/DraftCard.vue` (73行)
+- **功能**：版本号 + 预估费用（¥黄色）、Markdown 正文渲染（最大5000字）、天气摘要 + 分支标签
+- **样式**：自定义表格/标题/引用块/代码的暗色主题覆盖
+
+### 15.7 QuoteTable（报价单表格）
+- **文件**：`frontend/src/components/QuoteTable.vue` (90行)
+- **功能**：分项表格（国际机票/酒店/交通/门票/餐饮/导游）+ 人均费用 + 可视化进度条
+- **进度条**：渐变蓝色 `linear-gradient(90deg, #4455aa, #6677cc)`，宽度按占比计算
+- **备注**：底部显示 `currentQuote.notes`
+
+### 15.8 SettingsPanel（设置面板）
+- **文件**：`frontend/src/components/SettingsPanel.vue` (94行)
+- **功能**：会话 ID（可编辑 + 新建按钮）、客户 ID、渠道下拉（Web/微信/WhatsApp/Messenger/TikTok）、语言（中文/English）
+- **操作**：清空对话、刷新状态
+- **提示**：会话 ID 旁标注"（刷新不丢失）"
+
+### 15.9 响应式布局
+- `>1100px`：三栏 [Sidebar 280px] [Chat flex] [Detail 420px]
+- `800-1100px`：Detail 缩至 340px
+- `<800px`：单栏堆叠，Detail 最大 40vh
+
+---
+
+## 步骤 16：可观测性系统
+
+- **时间**：2026-07-22
+- **状态**：✅ 完成
+
+### 16.1 LangSmith（LangGraph 官方追踪）
+- **集成**：`main.py` 自动检测 `LANGCHAIN_API_KEY`
+- **功能**：LangGraph 节点自动追踪、LLM 调用自动记录、Tool 调用自动记录
+- **Trace 上下文**：`ls.trace(name="chat", inputs=..., metadata=..., tags=...)`
+- **Health check**：`features.langsmith` 显示是否已配置
+
+### 16.2 Langfuse（自定义 Span 追踪）
+- **文件**：`services/observability.py` (235行)
+- **功能**：
+  - `ObservabilityTrace`：单次请求的追踪上下文（trace_id, spans, latency）
+  - `start_trace()` / `get_trace()` / `end_trace()`：生命周期管理
+  - `trace_llm_call()` / `trace_tool_call()`：装饰器自动追踪
+  - Langfuse 上报：trace → span 层级结构，按 session_id 分组
+- **Span 类型**：llm, tool, pipeline
+- **降级**：Langfuse 不可用 → 不影响业务
+- **集成位置**：`main.py` `/chat` 端点，每次请求创建 + 结束 trace
+
+### 16.3 日志体系
+- Python `logging` 标准库
+- 各模块独立 logger：`tour-agent`, `services.llm_gateway`, `agents.intent_router` 等
+- 格式：`%(asctime)s [%(levelname)s] %(name)s: %(message)s`
+
+---
+
+## 步骤 17：Graph 节点与 State 设计补充
+
+- **时间**：2026-07-22
+- **状态**：✅ 完成
+
+### 17.1 Global State 设计
+- **文件**：`graph/state.py` (179行)
+- **OverallState**：继承 LangGraph `MessagesState`（自动 add_messages reducer）
+- **核心字段**：
+  - 会话：`session_id`, `customer_id`, `channel`, `language`
+  - 路由：`current_branch` (Branch enum), `intent_scores` (dict)
+  - 业务：`need` (TripNeed), `draft` (TripDraft), `quote` (Quote)
+  - 控制：`revision_count`, `intent_level`, `need_human`, `next_action`
+  - 输出：`final_reply`
+- **数据模型**：
+  - `TripNeed`：5必填项 (destination/days/arrival_date/pax/budget) + 偏好/特殊需求
+  - `TripDraft`：itinerary_md + estimated_cost + weather_summary + highlights
+  - `Quote`：flights/hotels/transport/tickets/meals/guide/total + notes
+- **State 兼容**：LangGraph 将 TypedDict 存为普通 dict，所有节点使用 `_s()` / `sget()` 安全访问
+
+### 17.2 节点管线（14 个节点）
+| 节点 | 文件 | 功能 |
+|------|------|------|
+| `input_guard` | `graph/nodes/input_guard.py` | 长度截断(4000字) + PII脱敏(手机/身份证/邮箱) |
+| `session_context` | `graph/nodes/session_context.py` | 语言兜底 + 会话ID生成 |
+| `intent_router` | `graph/nodes/intent_router.py` | 关键词拦截(投诉→转人工) + qwen-turbo 四分类 |
+| `customer_service` | `graph/nodes/customer_service.py` | FAQ/政策/订单查询，含转人工判断 |
+| `sales_agent` | `graph/nodes/sales_agent.py` | 产品推介 + 意向评分(高/中/低) |
+| `operations_agent` | `graph/nodes/operations_agent.py` | 商户入驻/订单履约/售后工单 |
+| `trip_planner` | `graph/nodes/trip_planner.py` | 6步生成行程草案 |
+| `intent_scorer` | `graph/nodes/intent_scorer.py` | 3路径评分：首次auto-accept / 关键词 / LLM |
+| `revision_loop` | `graph/nodes/revision_loop.py` | revision_count += 1（硬上限3次） |
+| `quote_agent` | `graph/nodes/quote_agent.py` | 国内/入境自适应报价生成 |
+| `human_handoff` | `graph/nodes/human_handoff.py` | 转人工提示 |
+| `operations_sync` | `graph/nodes/operations_sync.py` | 终态汇聚：update_crm + send_capi（非阻断） |
+
+### 17.3 条件边路由
+- **文件**：`graph/routing.py` (122行)
+- **路由函数**：`route_after_intent`, `route_after_service`, `route_after_sales`, `route_requirements`, `route_revision`
+- **必填项检查** (`route_requirements`)：兼容 dict 和 Pydantic 对象两种 State 形式
+- **修订限制** (`route_revision`)：revise 且 `revision_count < 3` → revision_loop，否则 → accept/give_up
+
+### 17.4 所有 Agent Prompt 清单
+| Prompt 文件 | Agent | 行数 | 特点 |
+|------------|-------|------|------|
+| `prompts/trip_planner.py` | TripPlannerAgent | ~100行 | 15年资深规划师 + 5部分输出模板 + 大交通判断规则 |
+| `prompts/customer_service.py` | CustomerServiceAgent | 129行 | 4个 few-shot + 转人工判断链 + emoji 语气要求 |
+| `prompts/sales_agent.py` | SalesAgent | 111行 | 3级意向(HIGH/MID/LOW) + 5大核心卖点 + 策略速查表 |
+| `prompts/operations_agent.py` | OperationsAgent | 95行 | 3个 few-shot + 操作规范(CRM/CAPI) + 处理流程 |
+| `prompts/quote_agent.py` | QuoteAgent | 114行 | 2个 few-shot + 3档计算标准表 + 输出模板 |
+| `prompts/intent_scorer.py` | IntentScorerAgent | ~30行 | 评分标准 + 输出 JSON 格式 |
+
+---
+
+## 步骤 18：main.py 代码优化 — 消除 8 个 IDE 标红
+
+- **时间**：2026-07-23
+- **状态**：✅ 完成
+
+### 修复清单
+
+| # | 级别 | 问题 | 修复 |
+|---|------|------|------|
+| 1 | Error | **重复 import** — `os/time/json/asyncio/logging/typing` 出现两次（line 8+20） | 合并为顶部一次导入 |
+| 2 | Error | **未使用的 import** — `get_trace` 导入但从未调用 | 删除 |
+| 3 | **Bug** | **`type(MemorySaver)` 写法错误** — `isinstance(x, type(MemorySaver))` = `isinstance(x, type)` 恒为 True，导致 `_postgres_checkpoint` 永远为 True | 改为 `isinstance(x, MemorySaver)` |
+| 4 | Error | **`ls` 可能未定义** — `import langsmith as ls` 在 try 块内，外部引用可能 NameError | 导入失败时 `_ls = None`，使用前检查 `_ls is not None` |
+| 5 | Error | **`_graph` 可能为 None** — Pylance 无法推断 lifespan 已初始化 `_graph` | 调用前添加 `assert _graph is not None` |
+| 6 | Error | **`OverallState(...)` 构造器不匹配** — LangGraph TypedDict 无标准 `__init__` | 改为 dict 字面量 `{"session_id": ..., "messages": [...]}` |
+| 7 | Hint | **`compressed` 变量未使用** — 压缩结果被丢弃 | 前缀 `_compressed` + TODO 注释 |
+| 8 | Hint | **`do_setlocale` 参数名引 hint** — lambda 参数未使用 | 前缀 `_do_setlocale` |
+
+### 代码结构优化
+
+提取 7 个辅助函数，消除 `/chat` 和 `/chat/stream` 两端的重复逻辑：
+
+| 函数 | 职责 |
+|------|------|
+| `_extract_draft(raw)` | TripDraft → dict 安全转换 |
+| `_extract_quote(raw)` | Quote → dict 安全转换 |
+| `_load_history(sid)` | 从记忆系统加载 + 压缩历史消息 |
+| `_save_assistant_reply(...)` | AI 回复写入三层记忆 |
+| `_build_fallback_reply(draft)` | 草案已生成但无回复时的兜底文案 |
+| `_start_langsmith_trace(req)` | 创建 LangSmith trace（含安全降级） |
+| `_end_langsmith_trace(ctx, exc)` | 安全关闭 LangSmith trace |
+
+### 验证
+- 语法检查：✅ `py_compile.compile` 通过
+- 健康检查：✅ `checkpoint=memory`（修复前永远显示 `postgres`）
+- 端到端：✅ `/chat` 返回正常（branch=service, reply_len=137）
+
+---
+
+## 步骤 19：intent_router.py 代码优化
+
+- **时间**：2026-07-23
+- **状态**：✅ 完成
+
+### 修复
+
+| # | 问题 | 修复 |
+|---|------|------|
+| 1 | `scores = result.get("scores", {})` → Pylance 推断为 `Any`，`max(scores.values())` 类型不匹配 | 显式过滤 + 类型转换：`{k: float(v) for k, v in raw_scores.items() if k in valid_branches}` |
+| 2 | `return {"current_branch": ...}` → 普通 dict 不匹配 `PartialState` TypedDict | 三条 return 统一加 `cast(PartialState, {...})` |
+| 3 | 额外清理：`max(scores.values(), default=0)` 中 `default` 返回 int，与 float 不一致 | 改为先判空 `if scores and max(scores.values()) < 0.3` |
+| 4 | 额外清理：`result.get("need_human", False)` 可能返回非 bool | `bool(result.get("need_human", False))` |
+
+---
+
 ## 待办
 
 - [x] `docker compose up -d` 启动基础设施
@@ -212,7 +702,12 @@
 - [x] 启动 FastAPI 服务，调通 `/chat` 接口
 - [x] 修复 intent_scorer 评分循环
 - [x] 修复日期提取年份默认值 (2023 → 2026)
-- [ ] 修复 quote_agent 报价生成(tools调用导致reply为空)
+- [x] 前后端打通 + Role 标准化 + 国内游修复
+- [x] 前端 localStorage 持久化 + HistorySidebar 侧边栏
+- [x] 流式输出 (SSE) — 后端 /chat/stream + 前端 ReadableStream
+- [x] 对话历史记录持久化修复 — 切换/刷新可恢复消息
+- [x] 意图路由修复 — 四个 Agent 精准分发
+- [x] main.py 代码优化 — 消除 IDE 标红 + 提取工具函数
 - [ ] Phase 2：接入真实天气 API（和风天气/OpenWeatherMap）
 - [ ] Phase 3：PostgresSaver 替换 MemorySaver
 - [ ] Phase 3：接入 Langfuse 可观测

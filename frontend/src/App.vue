@@ -2,9 +2,13 @@
   <div class="app">
     <StatusBar />
     <div class="layout">
-      <!-- 左侧：聊天 -->
+      <!-- 左侧：对话历史侧边栏 -->
+      <HistorySidebar />
+
+      <!-- 中间：聊天 -->
       <div class="main-col">
         <div class="topbar">
+          <button class="icon-btn" @click="store.toggleSidebar()" title="切换侧边栏">☰</button>
           <h1>TourAgent</h1>
           <button @click="settingsOpen = true" class="icon-btn" title="设置">⚙️</button>
         </div>
@@ -30,6 +34,7 @@
 import { ref, computed } from 'vue'
 import { useChatStore } from './stores/chat.js'
 import StatusBar from './components/StatusBar.vue'
+import HistorySidebar from './components/HistorySidebar.vue'
 import ChatPanel from './components/ChatPanel.vue'
 import DraftCard from './components/DraftCard.vue'
 import QuoteTable from './components/QuoteTable.vue'
@@ -58,7 +63,7 @@ body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-
   flex: 1; display: flex; flex-direction: column; min-width: 0;
 }
 .topbar {
-  display: flex; justify-content: space-between; align-items: center;
+  display: flex; justify-content: space-between; align-items: center; gap: 10px;
   padding: 12px 20px; background: #1a1a2e; border-bottom: 1px solid #2a2a3e;
 }
 .topbar h1 {
@@ -69,7 +74,7 @@ body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-
 .icon-btn {
   width: 36px; height: 36px; border-radius: 8px; border: 1px solid #333;
   background: none; color: #888; cursor: pointer; font-size: 16px;
-  transition: all .2s;
+  transition: all .2s; flex-shrink: 0;
 }
 .icon-btn:hover { border-color: #6677cc; color: #99aaff; }
 
@@ -83,10 +88,10 @@ body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-
   border: 1px solid #4e2a2a; color: #cc6666; font-size: 13px;
 }
 
-@media (max-width: 900px) {
-  .side-col { width: 320px; }
+@media (max-width: 1100px) {
+  .side-col { width: 340px; }
 }
-@media (max-width: 700px) {
+@media (max-width: 800px) {
   .layout { flex-direction: column; }
   .side-col { width: 100%; max-height: 40vh; }
 }

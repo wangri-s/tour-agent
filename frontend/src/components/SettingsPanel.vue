@@ -8,7 +8,7 @@
       </div>
 
       <div class="field">
-        <label>会话 ID</label>
+        <label>会话 ID <span class="hint">（刷新不丢失）</span></label>
         <div class="row">
           <input v-model="store.sessionId" />
           <button @click="store.newSession()" class="sm-btn">新建</button>
@@ -89,4 +89,5 @@ const store = useChatStore()
 }
 .danger-btn:hover { background: #3e1e1e; }
 .actions { display: flex; gap: 8px; margin-top: 8px; }
+.hint { color: #44cc44; font-size: 10px; }
 </style>

@@ -75,7 +75,7 @@ class TripPlannerAgent(BaseAgent):
         # 如果必填项不完整，先做需求提取
         if not need.is_complete():
             logger.info("[TripPlanner] 必填项不完整，提取需求...")
-            need = await self._extract_needs(last_msg, s["need"])
+            need = await self._extract_needs(last_msg, need)
             if not need.is_complete():
                 # 返回追问
                 missing = need.missing_fields()
@@ -144,15 +144,12 @@ class TripPlannerAgent(BaseAgent):
         prompt = self._build_generation_prompt(context)
         messages = [{"role": "user", "content": prompt}]
 
-        # 调用旗舰模型 (qwen-max)
-        result = await self.llm.chat(
-            system=self.system_prompt(),
+        # 调用旗舰模型 (qwen-max) — 流式输出
+        itinerary_md = await self.call_llm_stream(
             messages=messages,
             temperature=0.8,
             max_tokens=8000,
         )
-
-        itinerary_md = result.get("content", "")
 
         logger.info(f"[TripPlanner] 行程生成完成, 长度: {len(itinerary_md)} 字符")
 
@@ -204,15 +201,24 @@ class TripPlannerAgent(BaseAgent):
             raw = {k: getattr(state, k) for k in dir(state) if not k.startswith("_")}
             return {**defaults, **raw}
 
-    async def _extract_needs(self, user_msg: str, existing: TripNeed) -> TripNeed:
+    async def _extract_needs(self, user_msg: str, existing) -> TripNeed:
         """用轻量模型从用户消息中提取结构化需求"""
         from datetime import date as dt_date
         today = dt_date.today().strftime("%Y-%m-%d")
+
+        # 兼容 dict / TripNeed
+        if isinstance(existing, dict):
+            existing_data = existing
+        elif hasattr(existing, "model_dump"):
+            existing_data = existing.model_dump()
+        else:
+            existing_data = {}
+
         prompt = f"""从用户消息中提取旅游需求，返回 JSON。
 
 今天是 {today}。用户只给了月份和日期(如10月20日)时，默认使用当年。如用户说"下个月"则推算到当月之后。
 
-已有信息: {existing.model_dump_json()}
+已有信息: {json.dumps(existing_data, ensure_ascii=False)}
 
 用户消息: {user_msg}
 
@@ -238,7 +244,7 @@ class TripPlannerAgent(BaseAgent):
                 end = raw.rindex("}") + 1
                 data = json.loads(raw[start:end])
                 # 合并到已有 need
-                updated = existing.model_dump()
+                updated = dict(existing_data)
                 for key in ["destination", "arrival_date", "theme", "pace", "special_requests"]:
                     if data.get(key):
                         updated[key] = data[key]
@@ -296,6 +302,7 @@ class TripPlannerAgent(BaseAgent):
 - 主题偏好: {ctx['theme']}
 - 节奏偏好: {ctx['pace']}
 - 特殊需求: {ctx['special_requests'] or '无'}
+- ⚠️ 大交通: 国内出发 → 费用表填「🚄高铁/动车 ¥300-800」，严禁出现「国际机票」
 {'⚠️ 这是修订请求，客户反馈: ' + ctx['revision_feedback'] if ctx['is_revision'] else ''}
 
 ## 目的地信息 (知识库)
@@ -334,12 +341,17 @@ class TripPlannerAgent(BaseAgent):
 | 项目 | 单价 | 天数/次数 | 小计 |
 |------|------|-----------|------|
 | 🏨 酒店 | ¥X/晚 | X晚 | ¥X |
-| ✈️ 机票(国际段) | ¥X | 往返 | ¥X |
+| 🚄 大交通 | ¥X | — | ¥X |
 | 🚗 交通(市内) | ¥X/天 | X天 | ¥X |
 | 🎫 门票 | ¥X | 全部 | ¥X |
 | 🍜 餐饮 | ¥X/天 | X天 | ¥X |
 | 👨‍💼 导游(如需) | ¥X/天 | X天 | ¥X |
 | **💰 总计/人** | | | **¥X** |
+
+> ⚠️ **大交通判断规则（严格执行）**：
+> - 客户从国内城市出发（如"从山西""从上海""从广州"）→ 🚄高铁/动车 ¥300-800
+> - 客户是外国游客飞中国 → ✈️国际机票
+> - 本单客户从国内出发，大交通填写🚄高铁，严禁出现「国际机票」字样。
 
 ### 4. 天气与穿衣建议
 基于查询到的实际天气数据

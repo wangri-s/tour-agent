@@ -1,4 +1,4 @@
-"""LLM 网关 —— 统一封装模型调用 (千问 + OpenAI 兼容)"""
+"""LLM 网关 v2 — 统一封装模型调用 (千问 + OpenAI 兼容) | ROLE-NORMALIZE: human→user"""
 
 from __future__ import annotations
 
@@ -51,14 +51,23 @@ class LLMGateway:
             {"content": str, "tool_calls": [...]}  或 {"content": str}
         """
 
+        # 统一 normalize roles — 兼容 LangChain HumanMessage (human→user)
+        ROLE_MAP = {"human": "user", "ai": "assistant", "system": "system", "tool": "tool", "function": "tool"}
+        normalized = []
+        for m in messages:
+            role = m.get("role", "assistant") if isinstance(m, dict) else getattr(m, "type", "assistant")
+            content = m.get("content", "") if isinstance(m, dict) else getattr(m, "content", "")
+            normalized.append({"role": ROLE_MAP.get(role, role), "content": content})
+
         try:
             from openai import AsyncOpenAI
 
             client = AsyncOpenAI(api_key=self.api_key, base_url=self.base_url)
 
             formatted: list[dict[str, Any]] = [{"role": "system", "content": system}]
-            formatted.extend(messages)
+            formatted.extend(normalized)
 
+            logger.info(f"[LLM] calling {self.model} ({len(formatted)} messages, {len(tools or [])} tools)")
             params: dict[str, Any] = {
                 "model": self.model,
                 "messages": formatted,
@@ -70,7 +79,6 @@ class LLMGateway:
                 params["tools"] = self._format_tools(tools)
                 params["tool_choice"] = "auto"
 
-            logger.info(f"[LLM] calling {self.model} ({len(formatted)} messages, {len(tools or [])} tools)")
             response = await client.chat.completions.create(**params)
 
             choice = response.choices[0]
@@ -103,6 +111,56 @@ class LLMGateway:
             logger.error(f"[LLM Error]: {type(e).__name__}: {str(e)[:300]}")
             logger.debug(traceback.format_exc())
             return {"content": f"[AI 服务暂时不可用，请稍后重试]", "error": str(e)[:300]}
+
+    async def chat_stream(
+        self,
+        system: str,
+        messages: list[dict[str, str]],
+        temperature: float = 0.7,
+        max_tokens: int = 4096,
+    ):
+        """流式 Chat Completion — 异步生成器，逐 token yield
+
+        用法:
+            async for token in gateway.chat_stream(system, messages):
+                print(token, end="", flush=True)
+        """
+
+        ROLE_MAP = {"human": "user", "ai": "assistant", "system": "system", "tool": "tool", "function": "tool"}
+        normalized = []
+        for m in messages:
+            role = m.get("role", "assistant") if isinstance(m, dict) else getattr(m, "type", "assistant")
+            content = m.get("content", "") if isinstance(m, dict) else getattr(m, "content", "")
+            normalized.append({"role": ROLE_MAP.get(role, role), "content": content})
+
+        try:
+            from openai import AsyncOpenAI
+
+            client = AsyncOpenAI(api_key=self.api_key, base_url=self.base_url)
+
+            formatted: list[dict[str, Any]] = [{"role": "system", "content": system}]
+            formatted.extend(normalized)
+
+            logger.info(f"[LLM-stream] calling {self.model} ({len(formatted)} messages)")
+
+            response = await client.chat.completions.create(
+                model=self.model,
+                messages=formatted,
+                temperature=temperature,
+                max_tokens=max_tokens,
+                stream=True,
+                stream_options={"include_usage": True},
+            )
+
+            async for chunk in response:
+                if chunk.choices and chunk.choices[0].delta and chunk.choices[0].delta.content:
+                    yield chunk.choices[0].delta.content
+
+        except Exception as e:
+            import traceback
+            logger.error(f"[LLM-stream Error]: {type(e).__name__}: {str(e)[:300]}")
+            logger.debug(traceback.format_exc())
+            yield f"\n\n[AI 服务暂时不可用: {str(e)[:200]}]"
 
     async def chat_with_tools(
         self,

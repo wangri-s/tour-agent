@@ -131,13 +131,14 @@ def build_graph(checkpointer=None) -> StateGraph:
     builder.add_edge("operations_agent", "operations_sync")
     builder.add_edge("operations_sync", END)
 
-    # 旅游定制 → 条件边（必填项检查）
+    # 旅游定制 → 条件边（必填项检查 / 追问结束 / 进入评分）
     builder.add_conditional_edges(
         "trip_planner",
         route_requirements,
         {
             "trip_planner": "trip_planner",       # 必填未补齐 → 继续追问
             "intent_scorer": "intent_scorer",     # 已补齐 → 评分
+            "END": END,                           # 追问/草稿已回复 → 等待用户
         },
     )
 

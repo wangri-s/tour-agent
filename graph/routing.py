@@ -69,15 +69,38 @@ def route_after_sales(state: OverallState) -> str:
 # ---------------------------------------------------------------------------
 
 def route_requirements(state: OverallState) -> str:
-    """必填项检查：未补齐继续追问，已补齐进入评分"""
+    """必填项检查：未补齐且无回复→继续追问；已回复→结束等用户反馈；已补齐→评分"""
     need = _s(state, "need")
     draft = _s(state, "draft")
-    need_complete = need.is_complete() if hasattr(need, "is_complete") else False
-    draft_has_content = False
-    if draft:
-        draft_has_content = draft.itinerary_md if hasattr(draft, "itinerary_md") else draft.get("itinerary_md", "")
+    final_reply = _s(state, "final_reply", "")
+
+    # LangGraph 将 TypedDict 存为普通 dict，需同时兼容两种形式
+    if isinstance(need, dict):
+        need_complete = all([
+            need.get("destination"),
+            need.get("days", 0) > 0,
+            need.get("arrival_date"),
+            need.get("pax", 0) > 0,
+            need.get("budget_per_person", 0) > 0,
+        ])
+    elif hasattr(need, "is_complete"):
+        need_complete = need.is_complete()
+    else:
+        need_complete = False
+
+    if isinstance(draft, dict):
+        draft_has_content = bool(draft.get("itinerary_md", ""))
+    elif draft and hasattr(draft, "itinerary_md"):
+        draft_has_content = bool(draft.itinerary_md)
+    else:
+        draft_has_content = False
+
+    # 已补齐 + 已生成 → 进入评分
     if need_complete and draft_has_content:
         return "intent_scorer"
+    # 已有回复(追问或草稿) → 结束等待用户输入
+    if final_reply:
+        return "END"
     return "trip_planner"
 
 
