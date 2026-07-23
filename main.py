@@ -49,7 +49,9 @@ async def lifespan(app: FastAPI):
 
     # 启动三层记忆系统
     _memory = MemoryOrchestrator()
-    _memory._setup_event_bridge = lambda: None  # skip kafka bridge
+    # 跳过 Kafka 事件桥接 (避免启动耗时)
+    async def _noop(): return None
+    _memory._setup_event_bridge = _noop
     mem_status = await _memory.startup()
     logger.info(
         f"Memory: Redis={mem_status['redis']}, "
