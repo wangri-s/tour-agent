@@ -178,14 +178,41 @@
   - trip_planner → 库存查询(奢华酒店+门票) ✅ → qwen-max生成2,275字行程 ✅
 - **已知问题**：intent_scorer 评分循环导致重复生成（待优化评分模型）
 
+## 步骤 8：修复 intent_scorer + 日期 + 回复
+
+- **时间**：2026-07-23
+- **状态**：✅ 完成
+
+### 8.1 intent_scorer 评分循环修复
+- **问题**：首次生成草案后，intent_scorer 调用 LLM 评分误判为 `revise` → revision_loop → trip_planner 重新生成 → 死循环(3次超时)
+- **修复**：三层快速路径
+  1. `revision_count == 0` → 首次生成，直接 auto-accept，不调 LLM
+  2. 关键词匹配(好的/可以/满意/ok/great/...) → accept
+  3. LLM 评分兜底(仅复杂修订)，默认 `next_action=accept` 而非 `give_up`
+
+### 8.2 日期年份修复
+- **问题**：用户输入"10月20号"，LLM 默认用训练年份 2023
+- **修复**：`_extract_needs` prompt 注入 `今天是 2026-07-23`，指示缺少年份时默认当年
+- **验证**：`2026-10-20` ✅ (之前 `2023-10-20`)
+
+### 8.3 final_reply 为空修复
+- **问题**：quote_agent 生成的 reply 为空，覆盖了 trip_planner 的回复
+- **修复**：main.py 备选构造回复(有 draft 但无 reply 时自动生成)
+
+### 8.4 Kafka 状态
+- **Kafka 正常运行**：使用 confluentinc/cp-kafka:7.5.0 (KRaft 模式，不需要 Zookeeper)
+- **消费者组** `tour-agent-memory` 正常 join/consume
+- **生产者/消费者** 均正常，Kafka→MySQL 事件桥接已注册
+
 ## 待办
 
 - [x] `docker compose up -d` 启动基础设施
 - [x] `pip install -r requirements.txt` 安装新依赖
 - [x] `python scripts/index_knowledge_base.py` 索引知识库
 - [x] 启动 FastAPI 服务，调通 `/chat` 接口
-- [ ] 修复 intent_scorer 评分循环 (使用 qwen-turbo 替代 qwen-plus)
-- [ ] 修复日期提取年份默认值 (2023 → 2026)
+- [x] 修复 intent_scorer 评分循环
+- [x] 修复日期提取年份默认值 (2023 → 2026)
+- [ ] 修复 quote_agent 报价生成(tools调用导致reply为空)
 - [ ] Phase 2：接入真实天气 API（和风天气/OpenWeatherMap）
 - [ ] Phase 3：PostgresSaver 替换 MemorySaver
 - [ ] Phase 3：接入 Langfuse 可观测
