@@ -1,5 +1,12 @@
 """FastAPI 入口 —— /chat 接口 (千问驱动 + 三层记忆 + RAG + COT + LangSmith + Langfuse)"""
 
+# Windows UTF-8 编码修复 (必须在所有 import 之前)
+import sys
+import io
+if sys.platform == "win32":
+    sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding="utf-8", errors="replace")
+    sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding="utf-8", errors="replace")
+
 from __future__ import annotations
 
 import os
