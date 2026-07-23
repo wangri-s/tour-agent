@@ -1,5 +1,6 @@
 from tools.search_faq import search_faq
 from tools.rag_search import rag_search
+from tools.weather_api import get_real_weather
 from tools.check_handoff import check_handoff
 from tools.get_weather import get_weather
 from tools.query_calendar import query_calendar

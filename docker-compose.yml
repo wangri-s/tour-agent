@@ -179,6 +179,28 @@ services:
       - tourai-net
 
   # ===========================================================================
+  # PostgreSQL — LangGraph Checkpoint 持久化
+  # ===========================================================================
+  postgres:
+    image: postgres:16-alpine
+    container_name: tourai-postgres
+    ports:
+      - "5432:5432"
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: tourai
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD", "pg_isready", "-U", "postgres"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - tourai-net
+
+  # ===========================================================================
   # App — tour-agent FastAPI 服务
   # ===========================================================================
   app:
@@ -216,6 +238,7 @@ volumes:
   milvus_data:
   redis_data:
   kafka_data:
+  postgres_data:
   mysql_data:
 
 # =============================================================================

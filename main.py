@@ -1,4 +1,4 @@
-"""FastAPI 入口 —— /chat 接口 (千问驱动 + 三层记忆)"""
+"""FastAPI 入口 —— /chat 接口 (千问驱动 + 三层记忆 + RAG + COT + 可观测)"""
 
 from __future__ import annotations
 
@@ -16,6 +16,8 @@ from pydantic import BaseModel, Field
 from graph import build_graph
 from graph.state import OverallState
 from services.memory import MemoryOrchestrator
+from services.observability import start_trace, end_trace, get_trace
+from services.context_compressor import get_compressor
 
 # ---------------------------------------------------------------------------
 # 日志
@@ -33,28 +35,31 @@ logger = logging.getLogger("tour-agent")
 
 _graph = None
 _memory: MemoryOrchestrator | None = None
+_postgres_checkpoint = False
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    global _graph, _memory
+    global _graph, _memory, _postgres_checkpoint
     logger.info("=" * 50)
-    logger.info("Starting tour-agent v0.3.0 — 三层记忆 + RAG")
+    logger.info("Starting tour-agent v0.4.0 — COT + PostgresSaver + Langfuse + WeatherAPI")
     logger.info(f"LLM Model: {os.getenv('LLM_MODEL', 'qwen-plus')}")
     logger.info(f"API Base: {os.getenv('DASHSCOPE_BASE_URL', 'dashscope')}")
     logger.info("=" * 50)
 
     # 启动三层记忆系统
     _memory = MemoryOrchestrator()
+    _memory._setup_event_bridge = lambda: None  # skip kafka bridge
     mem_status = await _memory.startup()
     logger.info(
         f"Memory: Redis={mem_status['redis']}, "
         f"Kafka={mem_status['kafka']}, MySQL={mem_status['mysql']}"
     )
 
-    # 编译 LangGraph
+    # 编译 LangGraph (PostgresSaver 优先)
     _graph = build_graph()
-    logger.info("✅ Graph compiled, ready to serve.")
+    _postgres_checkpoint = not isinstance(_graph.checkpointer, type(MemorySaver))  # type: ignore
+    logger.info(f"✅ Graph compiled (PostgresCheckpoint={_postgres_checkpoint}), ready to serve.")
     yield
 
     # 关闭
@@ -66,7 +71,7 @@ async def lifespan(app: FastAPI):
 app = FastAPI(
     title="tour-agent",
     description="入境定制游 LangGraph Multi-Agent API — 千问驱动 + 三层记忆 + RAG",
-    version="0.3.0",
+    version="0.4.0",
     lifespan=lifespan,
 )
 
@@ -118,6 +123,23 @@ async def chat(req: ChatRequest):
 
     from langchain_core.messages import HumanMessage
 
+    # 开始可观测性追踪
+    trace = start_trace(req.session_id, req.customer_id)
+
+    # 上下文压缩: 获取历史消息 + 新消息，压缩后传入 State
+    history_msgs = []
+    if _memory:
+        history = await _memory.recall_context(req.session_id)
+        if history.get("messages"):
+            history_msgs = [
+                {"role": m.get("role", "user"), "content": m.get("content", "")}
+                for m in history["messages"]
+            ]
+
+    all_messages = history_msgs + [{"role": "user", "content": req.message}]
+    compressor = get_compressor()
+    compressed = await compressor.compress(all_messages, req.session_id, max_tokens=6000)
+
     state = OverallState(
         session_id=req.session_id,
         customer_id=req.customer_id,
@@ -141,10 +163,15 @@ async def chat(req: ChatRequest):
             language=req.language,
         )
 
+    trace.add_span("input_processing", "pipeline", input_data=req.message[:200],
+                   metadata={"msg_count": len(all_messages), "compressed": len(compressed) < len(all_messages)})
+
     try:
         result = await _graph.ainvoke(state, config)
     except Exception as e:
         logger.exception("Graph invocation failed")
+        trace.add_span("error", "pipeline", error=str(e))
+        end_trace()
         raise HTTPException(status_code=500, detail=str(e))
 
     # 构造响应 (先构造，再保存记忆)
@@ -211,6 +238,14 @@ async def chat(req: ChatRequest):
         f"draft={'yes' if draft_dict else 'no'}"
     )
 
+    # 结束追踪
+    trace.add_span("chat_response", "pipeline",
+                   output_data=final_reply[:200],
+                   metadata={"branch": result.get("current_branch", ""),
+                             "draft_len": len(draft_dict.get("itinerary_md", "")) if draft_dict else 0,
+                             "has_quote": bool(quote_dict)})
+    end_trace()
+
     return ChatResponse(
         reply=final_reply,
         draft=draft_dict,
@@ -232,9 +267,17 @@ async def health():
 
     return {
         "status": "ok",
-        "version": "0.3.0",
+        "version": "0.4.0",
         "model": os.getenv("LLM_MODEL", "qwen-plus"),
         "provider": "dashscope (千问)",
+        "features": {
+            "checkpoint": "postgres" if _postgres_checkpoint else "memory",
+            "observability": os.getenv("LANGFUSE_PUBLIC_KEY", "") != "",
+            "weather_api": os.getenv("QWEATHER_API_KEY", "") != "",
+            "rag": "milvus+dashscope",
+            "cot_prompts": True,
+            "context_compression": True,
+        },
         "memory": mem_stats,
         "rag": {
             "milvus": os.getenv("MILVUS_HOST", "localhost"),

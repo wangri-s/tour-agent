@@ -21,6 +21,7 @@
 
 from __future__ import annotations
 
+import logging
 from langgraph.graph import StateGraph, END
 from langgraph.checkpoint.memory import MemorySaver
 
@@ -45,8 +46,22 @@ from graph.routing import (
     route_revision,
 )
 
+logger = logging.getLogger(__name__)
 
-def build_graph(checkpointer: MemorySaver | None = None) -> StateGraph:
+
+def _get_checkpointer():
+    """获取 Checkpointer: PostgresSaver 优先 → MemorySaver 降级"""
+    try:
+        from services.checkpoint_store import create_postgres_saver_sync
+        saver = create_postgres_saver_sync()
+        if saver:
+            return saver
+    except Exception as e:
+        logger.info(f"[Graph] PostgresSaver 不可用: {e}，使用 MemorySaver")
+    return MemorySaver()
+
+
+def build_graph(checkpointer=None) -> StateGraph:
     """构建并返回编译后的 LangGraph 实例"""
 
     builder = StateGraph(OverallState)
@@ -151,5 +166,6 @@ def build_graph(checkpointer: MemorySaver | None = None) -> StateGraph:
     # 编译
     # =========================================================================
 
-    checkpointer = checkpointer or MemorySaver()
+    if checkpointer is None:
+        checkpointer = _get_checkpointer()
     return builder.compile(checkpointer=checkpointer)

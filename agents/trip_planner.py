@@ -20,7 +20,8 @@ from typing import Any
 from agents.base import BaseAgent
 from prompts.trip_planner import TRIP_PLANNER_PROMPT
 from graph.state import OverallState, TripDraft, TripNeed
-from tools.get_weather import get_weather
+from tools.get_weather import get_weather  # 降级备用
+from tools.weather_api import get_real_weather  # 真实天气 API
 from tools.query_calendar import query_calendar
 from tools.query_inventory import query_inventory
 from tools.rag_search import rag_search
@@ -94,9 +95,9 @@ class TripPlannerAgent(BaseAgent):
         )
 
         # =====================================================================
-        # Step 2: 并行查询天气 + 日历 + RAG 知识库
+        # Step 2: 并行查询天气(真实API优先→降级内置DB) + 日历 + RAG 知识库
         # =====================================================================
-        weather_data = await get_weather.ainvoke({"city": need.destination, "date": need.arrival_date})
+        weather_data = await get_real_weather.ainvoke({"city": need.destination, "date": need.arrival_date})
         calendar_data = await query_calendar.ainvoke({"date": need.arrival_date})
         faq_data = await rag_search.ainvoke({"query": f"{need.destination} 旅游指南 美食 景点 交通", "top_k": 3})
 
