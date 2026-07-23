@@ -190,14 +190,29 @@ async def chat(req: ChatRequest):
             },
         )
 
+    final_reply = result.get("final_reply", "")
+
+    # 备选: 如果 reply 为空但已有行程草案，构造默认回复
+    if not final_reply and draft_dict:
+        dest = draft_dict.get("highlights", [""])[0] if draft_dict.get("highlights") else ""
+        cost = draft_dict.get("estimated_cost", 0)
+        cost_str = f"\n💰 预估人均费用：**¥{cost:,.0f}**" if cost > 0 else ""
+        final_reply = (
+            f"为您定制了 **{dest}** 行程 ✨{cost_str}\n\n"
+            f"📋 行程已生成，包含 {draft_dict.get('daily_notes', [])} 天详细安排。您可以：\n"
+            f'- ✅ **满意** → 回复「好的/可以/满意」，我为您生成报价单\n'
+            f'- 🔄 **修改** → 告诉我哪里需要调整（如「多加点美食」、「节奏太赶了」）\n'
+            f'- 📞 **人工** → 回复「转人工」，由旅行顾问接洽'
+        )
+
     logger.info(
         f"[API] {req.session_id} → branch={result.get('current_branch')}, "
-        f"reply_len={len(result.get('final_reply', ''))}, "
+        f"reply_len={len(final_reply)}, "
         f"draft={'yes' if draft_dict else 'no'}"
     )
 
     return ChatResponse(
-        reply=result.get("final_reply", ""),
+        reply=final_reply,
         draft=draft_dict,
         quote=quote_dict,
         branch=result.get("current_branch", ""),

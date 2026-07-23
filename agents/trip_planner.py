@@ -205,7 +205,11 @@ class TripPlannerAgent(BaseAgent):
 
     async def _extract_needs(self, user_msg: str, existing: TripNeed) -> TripNeed:
         """用轻量模型从用户消息中提取结构化需求"""
+        from datetime import date as dt_date
+        today = dt_date.today().strftime("%Y-%m-%d")
         prompt = f"""从用户消息中提取旅游需求，返回 JSON。
+
+今天是 {today}。用户只给了月份和日期(如10月20日)时，默认使用当年。如用户说"下个月"则推算到当月之后。
 
 已有信息: {existing.model_dump_json()}
 
@@ -215,7 +219,7 @@ class TripPlannerAgent(BaseAgent):
 {{
     "destination": "城市名(中文)",
     "days": 天数或0,
-    "arrival_date": "YYYY-MM-DD或空",
+    "arrival_date": "YYYY-MM-DD格式，缺少年份时默认今年{today[:4]}年",
     "pax": 人数或0,
     "budget_per_person": 人均预算CNY或0,
     "theme": "主题偏好(历史文化/自然风光/美食/摄影/综合)或空",

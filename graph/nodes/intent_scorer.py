@@ -16,10 +16,14 @@ async def intent_scorer(state: OverallState) -> PartialState:
 
     result = await _agent.score(state)
 
-    return {
+    reply = result.get("reply", "")
+    ret = {
         "intent_level": result.get("intent_level", ""),
         "next_action": result.get("next_action", ""),
         "need_human": result.get("need_human", False),
-        "final_reply": result.get("reply", ""),
         "messages": result.get("messages", []),
     }
+    # 只有 scorer 明确返回 reply 时才覆盖 (避免空字符串覆盖 trip_planner 回复)
+    if reply:
+        ret["final_reply"] = reply
+    return ret

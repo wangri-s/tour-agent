@@ -23,13 +23,10 @@ def _s(state: Any, key: str, default: Any = None) -> Any:
 
 def route_after_intent(state: OverallState) -> str:
     """意图路由后分发到四类分支或人工"""
-    import logging
-    _log = logging.getLogger(__name__)
     need_human = _s(state, "need_human")
     if need_human:
         return "human_handoff"
     branch = _s(state, "current_branch", "")
-    _log.info(f"[route_after_intent] type={type(state).__name__} branch='{branch}'")
     if branch in (Branch.SERVICE.value, "customer_service"):
         return "customer_service"
     elif branch in (Branch.SALES.value, "sales_agent"):
