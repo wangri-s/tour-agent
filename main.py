@@ -1,11 +1,19 @@
 """FastAPI 入口 —— /chat 接口 (千问驱动 + 三层记忆 + RAG + COT + LangSmith + Langfuse)"""
 
-# Windows UTF-8 编码修复 (必须在所有 import 之前)
-import sys
-import io
+# ═══════════════════════════════════════════════════════════════════════
+# Windows 编码修复: GBK → UTF-8 (必须在所有 import 之前)
+# ═══════════════════════════════════════════════════════════════════════
+import sys, os, locale
+os.environ.setdefault("PYTHONIOENCODING", "utf-8")
+os.environ.setdefault("PYTHONUTF8", "1")
 if sys.platform == "win32":
-    sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding="utf-8", errors="replace")
-    sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding="utf-8", errors="replace")
+    try: sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+    except: pass
+    try: sys.stderr.reconfigure(encoding="utf-8", errors="replace")
+    except: pass
+# 强制 locale 返回 UTF-8 (修复 httpx/httpcore 在 Windows 上的 GBK 问题)
+if hasattr(locale, 'getpreferredencoding'):
+    locale.getpreferredencoding = lambda do_setlocale=True: "UTF-8"
 
 from __future__ import annotations
 

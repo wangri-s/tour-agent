@@ -99,8 +99,10 @@ class LLMGateway:
             return result
 
         except Exception as e:
-            logger.error(f"[LLM Error]: {str(e)}")
-            return {"content": f"[AI 服务暂时不可用，请稍后重试]", "error": str(e)}
+            import traceback
+            logger.error(f"[LLM Error]: {type(e).__name__}: {str(e)[:300]}")
+            logger.debug(traceback.format_exc())
+            return {"content": f"[AI 服务暂时不可用，请稍后重试]", "error": str(e)[:300]}
 
     async def chat_with_tools(
         self,
