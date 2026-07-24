@@ -324,22 +324,23 @@ class TripPlannerAgent(BaseAgent):
 - 天数: {ctx['days']}天
 - 日期: {ctx['arrival_date']}
 - 人数: {ctx['pax']}人
-- 人均预算: ¥{ctx['budget_per_person']} ({ctx['budget_level']}档)
+- 人均预算: **¥{ctx['budget_per_person']}**（这是客户给的预算，所有费用不得超出此数）
 - 主题偏好: {ctx['theme']}
 - 节奏偏好: {ctx['pace']}
 - 特殊需求: {ctx['special_requests'] or '无'}
 - ⚠️ 大交通: 国内出发 → 费用表填「🚄高铁/动车 ¥300-800」，严禁出现「国际机票」
 
-## 💰 预算硬约束（严格执行！）
+## 💰 预算硬约束（严格执行！按客户预算来，不要自作主张定等级）
 - 人均总费用上限: **¥{ctx['budget_per_person']}**，不得超过！
-- 每日人均预算: **¥{int(ctx['budget_per_person'] / max(ctx['days'], 1))}/天**
+- 每日人均可用: **¥{int(ctx['budget_per_person'] / max(ctx['days'], 1))}/天**
 - 酒店: ≤ ¥{ctx.get('hotel_per_night', 0)}/晚
 - 市内交通: ≤ ¥{ctx.get('transport_per_day', 0)}/天
 - 门票总计: ≤ ¥{ctx.get('tickets_total', 0)}
 - 餐饮: ≤ ¥{ctx.get('meals_per_day', 0)}/天
 - 导游: ≤ ¥{ctx.get('guide_per_day', 0)}/天 (如需)
 - 大交通(国内高铁): ≤ ¥{ctx.get('flight_total', 0)}
-- 如果算下来超出预算，必须降价（降酒店星级、选经济餐厅、减少包车改地铁）
+- 如果算下来超出预算，必须降价（降酒店、选便宜餐厅、减少包车改地铁）
+- **不要因为觉得预算高就选高价项目，严格按照客户给的 ¥{ctx['budget_per_person']} 来分配**
 {'⚠️ 这是修订请求，客户反馈: ' + ctx['revision_feedback'] if ctx['is_revision'] else ''}
 
 ## 目的地信息 (知识库)
@@ -377,10 +378,10 @@ class TripPlannerAgent(BaseAgent):
 ### 3. 费用预估
 
 > 🚨 **在填费用表之前，先算清楚**：
-> 人均总预算 = **¥{ctx['budget_per_person']}**（{ctx['budget_level']}档）
+> 人均总预算 = **¥{ctx['budget_per_person']}**
 > 酒店 ≤ ¥{ctx.get('hotel_per_night', 0)}/晚 × {ctx['days']}晚 = ¥{ctx.get('hotel_per_night', 0) * ctx['days']}
 > 餐饮 ≤ ¥{ctx.get('meals_per_day', 0)}/天 × {ctx['days']}天 = ¥{ctx.get('meals_per_day', 0) * ctx['days']}
-> **如果选舒适档酒店(¥300-600/晚)，总费用就能控制在预算内。不要因为是"{ctx['budget_level']}档"就全选最贵的！**
+> **严格按照客户给的预算 ¥{ctx['budget_per_person']} 来安排，酒店选预算范围内的，不要全选最贵的！**
 
 | 项目 | 单价 | 天数/次数 | 小计 |
 |------|------|-----------|------|

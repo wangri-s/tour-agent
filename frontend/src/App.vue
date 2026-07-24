@@ -60,7 +60,7 @@ body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-
 .layout { display: flex; flex: 1; overflow: hidden; }
 
 .main-col {
-  flex: 1; display: flex; flex-direction: column; min-width: 0;
+  flex: 1; display: flex; flex-direction: column; min-width: 0; min-height: 0; overflow: hidden;
 }
 .topbar {
   display: flex; justify-content: space-between; align-items: center; gap: 10px;

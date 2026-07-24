@@ -88,7 +88,7 @@ watch(() => store.messages.length, async () => {
 
 <style scoped>
 .chat-panel {
-  display: flex; flex-direction: column; height: 100%; background: #13131f;
+  display: flex; flex-direction: column; height: 100%; min-height: 0; overflow: hidden; background: #13131f;
 }
 .messages {
   flex: 1; overflow-y: auto; padding: 20px;

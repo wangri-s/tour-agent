@@ -727,6 +727,28 @@ budget=¥8,000  cost=¥7,925   (99%)  OK
 
 ---
 
+## 步骤 21：移除预算等级标签 + 前端布局修复
+
+- **时间**：2026-07-23
+- **状态**：✅ 完成
+
+### 21.1 移除预算等级标签
+- **问题**：`_map_budget()` 将预算映射为"经济/舒适/奢华"标签，LLM 看到"奢华"就选最高价项目，无视硬约束数字
+- **修复**：`_build_generation_prompt` 中移除所有 `({budget_level}档)` 标签
+  - 只保留具体预算数字和分项上限
+  - 增加提示："不要因为觉得预算高就选高价项目，严格按照客户给的预算来分配"
+  - 费用表区域改为："严格按照客户给的预算 ¥X 来安排"
+
+### 21.2 前端输入框被长文本遮挡修复
+- **问题**：LLM 回复行程（2000+ 字 Markdown）时，消息气泡撑开 `.main-col` 超出视口，输入框被推到屏幕外
+- **根因**：flex 子元素 `min-height: auto`（默认），内容撑开时不收缩
+- **修复**：
+  - `App.vue` `.main-col`：新增 `min-height: 0; overflow: hidden;`
+  - `ChatPanel.vue` `.chat-panel`：新增 `min-height: 0; overflow: hidden;`
+- **原理**：`min-height: 0` 允许 flex 子元素收缩到小于内容高度，配合 `overflow: hidden` + `.messages { overflow-y: auto }` 实现固定输入框 + 滚动消息区
+
+---
+
 ## 待办
 
 - [x] `docker compose up -d` 启动基础设施
@@ -742,6 +764,7 @@ budget=¥8,000  cost=¥7,925   (99%)  OK
 - [x] 意图路由修复 — 四个 Agent 精准分发
 - [x] main.py 代码优化 — 消除 IDE 标红 + 提取工具函数
 - [x] 行程预算约束修复 — Prompt 硬约束 + 后处理截断
+- [x] 移除预算等级标签 + 前端输入框布局修复
 - [ ] Phase 2：接入真实天气 API（和风天气/OpenWeatherMap）
 - [ ] Phase 3：PostgresSaver 替换 MemorySaver
 - [ ] Phase 3：接入 Langfuse 可观测
