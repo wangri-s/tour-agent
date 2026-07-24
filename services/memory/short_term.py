@@ -181,3 +181,30 @@ class ShortTermMemory:
     async def get_draft(self, session_id: str) -> dict[str, Any]:
         """获取行程草稿"""
         return await self._cache.get_agent_state(session_id, "trip_draft")
+
+    # =========================================================================
+    # 轮次计数器 (中期记忆触发)
+    # =========================================================================
+
+    async def increment_round(self, session_id: str) -> int:
+        """轮次 +1，每次续期 7 天 TTL"""
+        client = self._cache._client
+        if not client:
+            return 0
+
+        from services.redis_cache import KeyPrefix, TTL
+        key = f"{KeyPrefix.ROUND}{session_id}"
+        count = await client.incr(key)
+        await client.expire(key, TTL.ROUND)
+        return count
+
+    async def get_round(self, session_id: str) -> int:
+        """获取当前轮次"""
+        client = self._cache._client
+        if not client:
+            return 0
+
+        from services.redis_cache import KeyPrefix
+        key = f"{KeyPrefix.ROUND}{session_id}"
+        val = await client.get(key)
+        return int(val) if val else 0

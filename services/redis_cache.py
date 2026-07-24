@@ -38,6 +38,8 @@ class KeyPrefix:
     TOOL_CACHE  = "tourai:tool:"           # 工具缓存: string (json)
     TRIP_DRAFT  = "tourai:draft:"          # 行程草稿缓存: string (json)
     LOCK        = "tourai:lock:"           # 分布式锁: string
+    MID_TERM    = "tourai:mid:"            # 中期记忆摘要: list
+    ROUND       = "tourai:round:"          # 轮次计数器: string (int)
 
 
 # =============================================================================
@@ -52,6 +54,8 @@ class TTL:
     TOOL_CACHE  = 600       # 10 分钟
     TRIP_DRAFT  = 3600      # 1 小时
     LOCK        = 30        # 30 秒
+    MID_TERM    = 86400 * 30  # 30 天 (中期摘要)
+    ROUND       = 86400 * 7   # 7 天 (轮次计数器, 每次访问续期)
 
 
 class RedisCache:

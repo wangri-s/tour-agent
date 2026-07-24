@@ -26,6 +26,7 @@ from typing import Any
 from services.memory.short_term import ShortTermMemory
 from services.memory.working import WorkingMemory
 from services.memory.long_term import LongTermMemory
+from services.memory.mid_term import MidTermMemory
 from services.redis_cache import redis_cache
 from services.kafka_broker import kafka_broker
 from services.mysql_store import mysql_store
@@ -56,7 +57,9 @@ class MemoryOrchestrator:
         self.short = ShortTermMemory()
         self.working = WorkingMemory()
         self.long = LongTermMemory()
+        self.mid = MidTermMemory()
         self._ready = False
+        self._llm = None  # 延迟注入，避免循环 import
 
     # =========================================================================
     # 生命周期
@@ -320,6 +323,139 @@ class MemoryOrchestrator:
         )
         if success:
             logger.info("[EventBridge] agent-events → MySQL 桥接已注册")
+
+    # =========================================================================
+    # 中期记忆 — 隔 5 轮压缩
+    # =========================================================================
+
+    COMPRESS_INTERVAL = 5  # 每 5 轮触发一次压缩
+
+    async def inject_mid_term_context(self, session_id: str) -> str:
+        """获取中期摘要，注入为 graph 上下文
+
+        在 graph 调用前执行，返回 system 消息内容。
+        """
+        return await self.mid.get_recent_summaries(session_id, count=3)
+
+    async def maybe_compress_mid_term(
+        self,
+        session_id: str,
+        messages: list[dict[str, str]],
+    ) -> str | None:
+        """每 N 轮触发一次中期压缩
+
+        触发逻辑:
+          1. INCR 轮次计数器
+          2. round == 1 且 MySQL 有旧历史 → 恢复
+          3. round % 5 == 0 → 压缩最近 5 轮
+
+        Returns:
+            新生成的摘要文本 或 None (未触发)
+        """
+        # 延迟获取 LLM 网关 (避免循环 import)
+        if self._llm is None:
+            from services.llm_gateway import LLMGateway
+            self._llm = LLMGateway(model="qwen-turbo")
+
+        round_num = await self.short.increment_round(session_id)
+
+        # ---- 场景 1: 计数器过期，首次访问 ----
+        if round_num == 1:
+            await self._recover_if_needed(session_id)
+
+        # ---- 场景 2: 正常触发压缩 ----
+        if round_num % self.COMPRESS_INTERVAL != 0:
+            return None
+
+        start_round = round_num - self.COMPRESS_INTERVAL + 1
+        range_label = f"{start_round}-{round_num}"
+
+        # 取最近 N 轮的消息 (N*2 条: user + assistant)
+        recent = messages[-(self.COMPRESS_INTERVAL * 2):]
+
+        # 获取上一段摘要用于合并
+        prev_summary = await self.mid.get_latest_summary(session_id)
+
+        # 调 LLM 生成摘要
+        summary = await self._generate_round_summary(recent, prev_summary, range_label)
+        if not summary:
+            return None
+
+        # 持久化
+        await self.mid.save_summary(session_id, summary, range_label)
+
+        logger.info(
+            "[MidTerm] 第%s轮压缩完成: %d条消息 → %d字摘要",
+            range_label, len(recent), len(summary),
+        )
+        return summary
+
+    async def _generate_round_summary(
+        self,
+        messages: list[dict[str, str]],
+        prev_summary: str,
+        range_label: str,
+    ) -> str:
+        """调 LLM 压缩最近 N 轮对话，合并旧摘要"""
+        history = "\n".join(
+            f"[{m.get('role', '?')}]: {m.get('content', '')[:300]}"
+            for m in messages
+        )
+
+        merge_hint = ""
+        if prev_summary:
+            merge_hint = (
+                f"已有的前期摘要:\n{prev_summary}\n\n"
+                "请将上述已有摘要与新的对话历史合并为一段新的完整摘要。\n"
+            )
+
+        prompt = (
+            f"请将以下对话压缩为简洁摘要，保留关键信息:\n\n"
+            f"{merge_hint}"
+            f"最近{self.COMPRESS_INTERVAL}轮对话 ({range_label}):\n"
+            f"{history[:3000]}\n\n"
+            "关键信息类别:\n"
+            "1. 客户需求: 目的地、日期、人数、预算、偏好\n"
+            "2. 已确认信息 vs 待确认信息\n"
+            "3. 行程变更: 客户要求过什么修改\n"
+            "4. 情绪变化: 满意度趋势\n"
+            "5. 关键决策: 用户确认了什么\n\n"
+            "请用中文输出，总长度不超过 200 字。"
+        )
+
+        try:
+            result = await self._llm.chat(
+                system="你是一个专业的对话摘要助手，擅长提取关键信息。",
+                messages=[{"role": "user", "content": prompt}],
+                temperature=0.3,
+                max_tokens=500,
+            )
+            return result.get("content", "")[:300]
+        except Exception as e:
+            logger.warning("[MidTerm] LLM 摘要生成失败: %s", e)
+            return ""
+
+    async def _recover_if_needed(self, session_id: str) -> None:
+        """计数器过期后，从 MySQL 恢复旧会话为初始摘要"""
+        if not mysql_store._pool:
+            return
+
+        # 检查中期摘要是否已存在 (说明不是新会话)
+        existing = await self.mid.get_summaries(session_id)
+        if existing:
+            return  # 已有摘要，不需要恢复
+
+        # 检查 MySQL 有无旧历史
+        old_msgs = await self.long.get_conversation(session_id, limit=100)
+        if not old_msgs:
+            return  # 真的是新会话
+
+        # 有旧历史 → 恢复
+        formatted = [
+            {"role": m.get("role", "user"), "content": m.get("content", "")}
+            for m in old_msgs
+        ]
+        await self.mid.recover_from_history(session_id, formatted, self._llm)
 
     # =========================================================================
     # 统计

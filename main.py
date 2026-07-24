@@ -302,14 +302,26 @@ async def chat(req: ChatRequest):
     history_msgs = await _load_history(req.session_id)
     all_messages = history_msgs + [{"role": "user", "content": req.message}]
     _compressed = await get_compressor().compress(all_messages, req.session_id, max_tokens=6000)
-    # TODO: 将 _compressed 注入 graph state 以利用压缩后的上下文
+
+    # ---- 中期记忆注入 ----
+    mid_context = ""
+    if _memory:
+        mid_context = await _memory.inject_mid_term_context(req.session_id)
+
+    # 构建 graph state (含中期记忆)
+    state_messages: list[Any] = [HumanMessage(content=req.message)]
+    if mid_context:
+        from langchain_core.messages import SystemMessage
+        state_messages.insert(0, SystemMessage(
+            content=f"[会话中期记忆 — 前方对话摘要]\n{mid_context}"
+        ))
 
     state: OverallState = {  # type: ignore[assignment]
         "session_id": req.session_id,
         "customer_id": req.customer_id,
         "channel": req.channel,
         "language": req.language,
-        "messages": [HumanMessage(content=req.message)],
+        "messages": state_messages,  # type: ignore[list-item]
     }
 
     config = {"configurable": {"thread_id": req.session_id}}
@@ -326,7 +338,7 @@ async def chat(req: ChatRequest):
     trace_ctx.add_span(
         "input_processing", "pipeline",
         input_data=req.message[:200],
-        metadata={"msg_count": len(all_messages), "compressed": len(_compressed) < len(all_messages)},
+        metadata={"msg_count": len(all_messages), "mid_context": bool(mid_context)},
     )
 
     # ---- 调用 LangGraph ----
@@ -351,6 +363,10 @@ async def chat(req: ChatRequest):
         req.session_id, req.customer_id, req.channel, req.language,
         branch, final_reply, draft_dict, quote_dict,
     )
+
+    # ---- 中期记忆压缩 (每 5 轮触发) ----
+    if _memory:
+        await _memory.maybe_compress_mid_term(req.session_id, all_messages)
 
     latency_ms = (time.time() - t_start) * 1000
     logger.info(
@@ -407,17 +423,28 @@ async def chat_stream(req: ChatRequest):
         try:
             t_start = time.time()
 
-            # 上下文压缩
+            # 上下文压缩 + 中期记忆注入
             history_msgs = await _load_history(req.session_id)
             all_messages = history_msgs + [{"role": "user", "content": req.message}]
             _compressed = await get_compressor().compress(all_messages, req.session_id, max_tokens=6000)
+
+            mid_context = ""
+            if _memory:
+                mid_context = await _memory.inject_mid_term_context(req.session_id)
+
+            state_msgs: list[Any] = [HumanMessage(content=req.message)]
+            if mid_context:
+                from langchain_core.messages import SystemMessage
+                state_msgs.insert(0, SystemMessage(
+                    content=f"[会话中期记忆 — 前方对话摘要]\n{mid_context}"
+                ))
 
             state: OverallState = {  # type: ignore[assignment]
                 "session_id": req.session_id,
                 "customer_id": req.customer_id,
                 "channel": req.channel,
                 "language": req.language,
-                "messages": [HumanMessage(content=req.message)],
+                "messages": state_msgs,  # type: ignore[list-item]
             }
 
             config = {"configurable": {"thread_id": req.session_id}}
@@ -464,6 +491,10 @@ async def chat_stream(req: ChatRequest):
                 req.session_id, req.customer_id, req.channel, req.language,
                 branch, final_reply, draft_dict, quote_dict,
             )
+
+            # 中期记忆压缩
+            if _memory:
+                await _memory.maybe_compress_mid_term(req.session_id, all_messages)
 
             latency_ms = (time.time() - t_start) * 1000
             logger.info("[API-stream] %s done, latency=%.0fms", req.session_id, latency_ms)

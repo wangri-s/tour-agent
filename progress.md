@@ -856,6 +856,51 @@ def _has_trip_context(state):
 
 ---
 
+## 步骤 24：中期记忆实现 — 隔 5 轮压缩
+
+- **时间**：2026-07-24
+- **状态**：✅ 完成
+
+### 新增文件
+- **`services/memory/mid_term.py`** (142行) — MidTermMemory 类
+  - `save_summary()`: 摘要存入 Redis List (FIFO, 最多保留 5 段)
+  - `get_summaries()` / `get_recent_summaries()`: 读取 + 拼接上下文
+  - `get_latest_summary()`: 获取最新一段（用于合并）
+  - `recover_from_history()`: 计数器过期后从 MySQL 恢复
+
+### 修改文件
+- **`services/redis_cache.py`**: 新增 `KeyPrefix.MID_TERM` / `ROUND`, `TTL.MID_TERM` (30天) / `ROUND` (7天)
+- **`services/memory/short_term.py`**: 新增 `increment_round()` (Redis INCR + 续期) / `get_round()`
+- **`services/memory/orchestrator.py`**:
+  - 引入 `MidTermMemory` (`self.mid`)
+  - `inject_mid_term_context()`: graph 调用前获取摘要
+  - `maybe_compress_mid_term()`: 每 5 轮触发
+  - `_generate_round_summary()`: LLM 压缩 + 旧摘要合并
+  - `_recover_if_needed()`: 计数器过期 → MySQL 恢复
+- **`main.py`**:
+  - `/chat`: graph 前注入 SystemMessage("[中期记忆]"), graph 后调用 `maybe_compress_mid_term()`
+  - `/chat/stream`: 同上
+
+### 数据流
+```
+每轮: INCR round → 判断 round % 5 == 0?
+  NO  → inject_mid_term_context() → graph → END
+  YES → 取最近 5 轮消息 + 旧摘要 → LLM 合并压缩 → 存 Redis List → graph → END
+
+过期恢复:
+  round == 1 且 MySQL 有旧历史 → 全文压缩为"[历史]"摘要 → 存 Redis
+```
+
+### 验证
+```
+发送 6 轮消息:
+  Round counter: 6 ✅
+  Mid-term entries: 2 (恢复摘要 + 第1-5轮摘要) ✅
+  Round TTL: ~7d ✅ | Mid TTL: ~30d ✅
+```
+
+---
+
 ## 待办
 
 - [x] `docker compose up -d` 启动基础设施
@@ -875,6 +920,7 @@ def _has_trip_context(state):
 - [x] PostgresSaver 修复 — AsyncPostgresSaver + Windows 降级 MemorySaver
 - [x] Docker 端口迁移 — Kafka 29092, Milvus metrics 29091
 - [x] 行程参数补全路由 — 追问回答不再误入客服
+- [x] 中期记忆实现 — 隔 5 轮压缩 + Redis 轮次计数器
 - [ ] Phase 2：接入真实天气 API（和风天气/OpenWeatherMap）
 - [ ] Phase 3：Linux 部署启用 PostgresSaver
 - [ ] Phase 3：上下文压缩结果注入 graph state
