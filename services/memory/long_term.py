@@ -176,6 +176,43 @@ class LongTermMemory:
         return await self._store.get_rag_stats(days)
 
     # =========================================================================
+    # 中期记忆摘要持久化
+    # =========================================================================
+
+    async def save_summary(
+        self, session_id: str, round_range: str, summary: str, round_count: int = 0
+    ) -> int:
+        """持久化中期摘要到 MySQL"""
+        if not self._store._pool:
+            return 0
+        return await self._store._execute(
+            "INSERT INTO session_summaries (session_id, round_range, summary, round_count) "
+            "VALUES (%s, %s, %s, %s)",
+            (session_id, round_range, summary, round_count),
+        )
+
+    async def get_summaries(self, session_id: str) -> list[dict[str, Any]]:
+        """获取会话的中期摘要列表"""
+        if not self._store._pool:
+            return []
+        return await self._store._fetch(
+            "SELECT round_range, summary, round_count, created_at "
+            "FROM session_summaries WHERE session_id = %s ORDER BY id",
+            (session_id,),
+        )
+
+    async def count_rounds(self, session_id: str) -> int:
+        """从 conversations 表计算实际对话轮数 (user 消息数)"""
+        if not self._store._pool:
+            return 0
+        rows = await self._store._fetch(
+            "SELECT COUNT(*) AS cnt FROM conversations "
+            "WHERE session_id = %s AND role = 'user'",
+            (session_id,),
+        )
+        return rows[0]["cnt"] if rows else 0
+
+    # =========================================================================
     # 统计
     # =========================================================================
 

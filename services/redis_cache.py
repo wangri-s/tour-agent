@@ -54,8 +54,8 @@ class TTL:
     TOOL_CACHE  = 600       # 10 分钟
     TRIP_DRAFT  = 3600      # 1 小时
     LOCK        = 30        # 30 秒
-    MID_TERM    = 86400 * 30  # 30 天 (中期摘要)
-    ROUND       = 86400 * 7   # 7 天 (轮次计数器, 每次访问续期)
+    MID_TERM    = 86400      # 24 小时 (中期摘要, 过期从 MySQL 恢复)
+    ROUND       = 86400      # 24 小时 (轮次计数器, 过期从 MySQL 联表恢复)
 
 
 class RedisCache:

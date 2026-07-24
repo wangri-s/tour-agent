@@ -129,7 +129,23 @@ CREATE TABLE IF NOT EXISTS faq_feedback (
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='FAQ/RAG 质量反馈';
 
 -- -------------------------------------------------------------------------
--- 6. 知识库文档 (文档元数据管理)
+-- 6. 中期记忆摘要 (隔 N 轮压缩持久化)
+-- -------------------------------------------------------------------------
+
+CREATE TABLE IF NOT EXISTS session_summaries (
+    id              BIGINT          AUTO_INCREMENT PRIMARY KEY,
+    session_id      VARCHAR(64)     NOT NULL COMMENT '关联会话',
+    round_range     VARCHAR(32)     NOT NULL COMMENT '轮次范围: 1-5, 6-10, 历史',
+    summary         TEXT            NOT NULL COMMENT '压缩后的摘要文本',
+    round_count     INT             DEFAULT 0 COMMENT '压缩时已完成的轮次数',
+    created_at      DATETIME        NOT NULL DEFAULT CURRENT_TIMESTAMP,
+
+    INDEX idx_session (session_id),
+    INDEX idx_created (created_at)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='中期记忆摘要 (Redis 热备, 过期恢复)';
+
+-- -------------------------------------------------------------------------
+-- 7. 知识库文档 (文档元数据管理)
 -- -------------------------------------------------------------------------
 
 CREATE TABLE IF NOT EXISTS knowledge_docs (

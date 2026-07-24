@@ -381,11 +381,12 @@ class MemoryOrchestrator:
         if not summary:
             return None
 
-        # 持久化
+        # 持久化到 Redis + MySQL
         await self.mid.save_summary(session_id, summary, range_label)
+        await self.long.save_summary(session_id, range_label, summary, round_num)
 
         logger.info(
-            "[MidTerm] 第%s轮压缩完成: %d条消息 → %d字摘要",
+            "[MidTerm] 第%s轮压缩完成: %d条消息 → %d字摘要 (Redis+MySQL)",
             range_label, len(recent), len(summary),
         )
         return summary
@@ -436,26 +437,52 @@ class MemoryOrchestrator:
             return ""
 
     async def _recover_if_needed(self, session_id: str) -> None:
-        """计数器过期后，从 MySQL 恢复旧会话为初始摘要"""
+        """计数器过期后，从 MySQL 联表查询真实轮数并恢复摘要"""
         if not mysql_store._pool:
             return
 
-        # 检查中期摘要是否已存在 (说明不是新会话)
-        existing = await self.mid.get_summaries(session_id)
-        if existing:
-            return  # 已有摘要，不需要恢复
+        # 先查 MySQL 有无该会话的持久化摘要 (过期前写入的)
+        db_summaries = await self.long.get_summaries(session_id)
+        if db_summaries:
+            # 有 MySQL 持久化摘要 → 回填到 Redis
+            for s in db_summaries:
+                await self.mid.save_summary(
+                    session_id, s["summary"],
+                    s.get("round_range", "历史"),
+                )
+            logger.info(
+                "[MidTerm] 从 MySQL 恢复 %d 段摘要 → Redis",
+                len(db_summaries),
+            )
+            # 恢复轮次计数器
+            actual_rounds = await self.long.count_rounds(session_id)
+            if actual_rounds > 0:
+                client = self.short._cache._client
+                if client:
+                    from services.redis_cache import KeyPrefix, TTL
+                    key = f"{KeyPrefix.ROUND}{session_id}"
+                    await client.set(key, actual_rounds)
+                    await client.expire(key, TTL.ROUND)
+                    logger.info(
+                        "[MidTerm] 从 MySQL 恢复轮次: %d 轮",
+                        actual_rounds,
+                    )
+            return
 
-        # 检查 MySQL 有无旧历史
+        # 无持久化摘要 → 检查是否有旧对话历史需要首次压缩
         old_msgs = await self.long.get_conversation(session_id, limit=100)
         if not old_msgs:
             return  # 真的是新会话
 
-        # 有旧历史 → 恢复
+        # 有旧历史 → 生成初始摘要
         formatted = [
             {"role": m.get("role", "user"), "content": m.get("content", "")}
             for m in old_msgs
         ]
-        await self.mid.recover_from_history(session_id, formatted, self._llm)
+        summary = await self.mid.recover_from_history(session_id, formatted, self._llm)
+        # 同步写入 MySQL
+        if summary:
+            await self.long.save_summary(session_id, "历史", summary, len(old_msgs))
 
     # =========================================================================
     # 统计
