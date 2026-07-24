@@ -6,6 +6,9 @@
 - 生产环境持久化
 
 使用 langgraph-checkpoint-postgres 包。
+
+注意: PostgresSaver.from_conn_string() 返回 context manager，
+必须 __enter__() 后才能调用 setup()。
 """
 
 from __future__ import annotations
@@ -17,14 +20,15 @@ from typing import Any
 logger = logging.getLogger(__name__)
 
 
-async def create_postgres_saver() -> Any | None:
-    """创建 PostgresSaver 实例
+def create_postgres_saver_sync() -> Any | None:
+    """创建 PostgresSaver 实例 (同步)
 
-    从环境变量读取 PostgreSQL 连接信息。
-    如果连接失败或包未安装，返回 None (退化为 MemorySaver)。
+    PostgresSaver.from_conn_string() 返回 _GeneratorContextManager，
+    需要用 __enter__() 取出内部实例后才能 setup()。
 
     Returns:
-        PostgresSaver 实例 或 None
+        (saver, context_manager) 元组 或 None
+        context_manager 需在整个应用生命周期保持打开，shutdown 时 __exit__()
     """
     pg_url = os.getenv("POSTGRES_URL", "")
     if not pg_url:
@@ -32,7 +36,6 @@ async def create_postgres_saver() -> Any | None:
             "DATABASE_URL",
             "postgresql://postgres:postgres@localhost:5432/tourai",
         )
-        # 如果 DATABASE_URL 是 MySQL URL，则不使用
         if "mysql" in pg_url.lower():
             logger.info("[Checkpoint] DATABASE_URL 是 MySQL，跳过 PostgresSaver")
             return None
@@ -40,29 +43,20 @@ async def create_postgres_saver() -> Any | None:
     try:
         from langgraph.checkpoint.postgres import PostgresSaver
 
-        saver = PostgresSaver.from_conn_string(pg_url)
-        await saver.setup()
-        logger.info(f"[Checkpoint] PostgresSaver 连接成功 → {pg_url.split('@')[1] if '@' in pg_url else pg_url}")
+        # from_conn_string 返回 context manager，手动进入
+        cm = PostgresSaver.from_conn_string(pg_url)
+        saver = cm.__enter__()
+        saver.setup()
+
+        logger.info(
+            "[Checkpoint] PostgresSaver 连接成功 → %s",
+            pg_url.split("@")[1] if "@" in pg_url else pg_url,
+        )
         return saver
 
     except ImportError:
         logger.warning("[Checkpoint] langgraph-checkpoint-postgres 未安装，使用 MemorySaver")
         return None
     except Exception as e:
-        logger.warning(f"[Checkpoint] PostgresSaver 连接失败: {e}，使用 MemorySaver")
-        return None
-
-
-def create_postgres_saver_sync() -> Any | None:
-    """同步版本 (用于 builder.py)"""
-    import asyncio
-
-    try:
-        loop = asyncio.get_event_loop()
-        if loop.is_running():
-            import nest_asyncio
-            nest_asyncio.apply()
-        return asyncio.run(create_postgres_saver())
-    except Exception as e:
-        logger.warning(f"[Checkpoint] 同步创建失败: {e}")
+        logger.warning("[Checkpoint] PostgresSaver 连接失败: %s，使用 MemorySaver", e)
         return None

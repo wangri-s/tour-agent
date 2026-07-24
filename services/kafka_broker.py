@@ -93,7 +93,7 @@ class KafkaBroker:
 
     def __init__(self, bootstrap_servers: str | None = None):
         self.bootstrap = bootstrap_servers or os.getenv(
-            "KAFKA_BOOTSTRAP_SERVERS", "localhost:9092"
+            "KAFKA_BOOTSTRAP_SERVERS", "localhost:29092"
         )
         self._producer: Any = None
         self._consumers: dict[str, Any] = {}
