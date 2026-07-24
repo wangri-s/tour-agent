@@ -108,6 +108,7 @@ class TripPlannerAgent(BaseAgent):
         # Step 3: 查询库存
         # =====================================================================
         budget_level = self._map_budget(need.budget_per_person)
+        budget_limits = self._calc_budget_limits(need.budget_per_person, need.days)
         inventory_data = await query_inventory.ainvoke({
             "city": need.destination,
             "date": need.arrival_date,
@@ -139,6 +140,8 @@ class TripPlannerAgent(BaseAgent):
             "calendar": calendar_data,
             "faq": faq_data,
             "inventory": inventory_data,
+            # 预算硬上限
+            **budget_limits,
         }
 
         prompt = self._build_generation_prompt(context)
@@ -289,6 +292,29 @@ class TripPlannerAgent(BaseAgent):
         else:
             return "奢华"
 
+    def _calc_budget_limits(self, budget_per_person: float, days: int) -> dict[str, float]:
+        """根据人均预算和天数计算各项硬上限
+
+        分配比例:
+            大交通: 15% (国内高铁) / 30% (国际机票)
+            酒店:   40%
+            交通:   12%
+            门票:   10%
+            餐饮:   15%
+            导游:    8%
+        """
+        total = budget_per_person
+        return {
+            "total": total,
+            "per_day": round(total / max(days, 1)),
+            "hotel_per_night": round(total * 0.40 / max(days, 1)),
+            "transport_per_day": round(total * 0.12 / max(days, 1)),
+            "tickets_total": round(total * 0.10),
+            "meals_per_day": round(total * 0.15 / max(days, 1)),
+            "guide_per_day": round(total * 0.08 / max(days, 1)),
+            "flight_total": round(total * 0.15),  # 国内高铁
+        }
+
     def _build_generation_prompt(self, ctx: dict) -> str:
         """构建行程生成提示"""
         return f"""请基于以下信息生成一份完整的 {ctx['destination']} {ctx['days']}日深度游行程：
@@ -303,6 +329,17 @@ class TripPlannerAgent(BaseAgent):
 - 节奏偏好: {ctx['pace']}
 - 特殊需求: {ctx['special_requests'] or '无'}
 - ⚠️ 大交通: 国内出发 → 费用表填「🚄高铁/动车 ¥300-800」，严禁出现「国际机票」
+
+## 💰 预算硬约束（严格执行！）
+- 人均总费用上限: **¥{ctx['budget_per_person']}**，不得超过！
+- 每日人均预算: **¥{int(ctx['budget_per_person'] / max(ctx['days'], 1))}/天**
+- 酒店: ≤ ¥{ctx.get('hotel_per_night', 0)}/晚
+- 市内交通: ≤ ¥{ctx.get('transport_per_day', 0)}/天
+- 门票总计: ≤ ¥{ctx.get('tickets_total', 0)}
+- 餐饮: ≤ ¥{ctx.get('meals_per_day', 0)}/天
+- 导游: ≤ ¥{ctx.get('guide_per_day', 0)}/天 (如需)
+- 大交通(国内高铁): ≤ ¥{ctx.get('flight_total', 0)}
+- 如果算下来超出预算，必须降价（降酒店星级、选经济餐厅、减少包车改地铁）
 {'⚠️ 这是修订请求，客户反馈: ' + ctx['revision_feedback'] if ctx['is_revision'] else ''}
 
 ## 目的地信息 (知识库)
@@ -338,6 +375,13 @@ class TripPlannerAgent(BaseAgent):
 - **小贴士** (注意事项/拍照点/预约提醒)
 
 ### 3. 费用预估
+
+> 🚨 **在填费用表之前，先算清楚**：
+> 人均总预算 = **¥{ctx['budget_per_person']}**（{ctx['budget_level']}档）
+> 酒店 ≤ ¥{ctx.get('hotel_per_night', 0)}/晚 × {ctx['days']}晚 = ¥{ctx.get('hotel_per_night', 0) * ctx['days']}
+> 餐饮 ≤ ¥{ctx.get('meals_per_day', 0)}/天 × {ctx['days']}天 = ¥{ctx.get('meals_per_day', 0) * ctx['days']}
+> **如果选舒适档酒店(¥300-600/晚)，总费用就能控制在预算内。不要因为是"{ctx['budget_level']}档"就全选最贵的！**
+
 | 项目 | 单价 | 天数/次数 | 小计 |
 |------|------|-----------|------|
 | 🏨 酒店 | ¥X/晚 | X晚 | ¥X |
@@ -346,12 +390,9 @@ class TripPlannerAgent(BaseAgent):
 | 🎫 门票 | ¥X | 全部 | ¥X |
 | 🍜 餐饮 | ¥X/天 | X天 | ¥X |
 | 👨‍💼 导游(如需) | ¥X/天 | X天 | ¥X |
-| **💰 总计/人** | | | **¥X** |
+| **💰 总计/人** | | | **¥{ctx['budget_per_person']}** |
 
-> ⚠️ **大交通判断规则（严格执行）**：
-> - 客户从国内城市出发（如"从山西""从上海""从广州"）→ 🚄高铁/动车 ¥300-800
-> - 客户是外国游客飞中国 → ✈️国际机票
-> - 本单客户从国内出发，大交通填写🚄高铁，严禁出现「国际机票」字样。
+> ⚠️ 填完费用表后，逐项加总验证：如果总计 > ¥{ctx['budget_per_person']}，回头降低酒店/餐饮/交通的单价！
 
 ### 4. 天气与穿衣建议
 基于查询到的实际天气数据
@@ -364,17 +405,18 @@ class TripPlannerAgent(BaseAgent):
 - 应急信息
 
 ## 约束
+- ⚠️ **人均总费用严格 ≤ ¥{ctx['budget_per_person']}**，超了必须降档重算
+- 各项费用参考上方「预算硬约束」中的上限
 - 每天景点间交通 ≤ 2.5 小时
 - 上午安排体力消耗大的景点
 - 每2天安排一段自由活动时间
-- 预算与{ctx['budget_level']}档匹配
 - 输出为纯 Markdown，便于直接发送给客户"""
 
     def _parse_draft(self, md: str, weather_data: str, need: TripNeed, state: dict) -> TripDraft:
         """从 LLM 输出解析 TripDraft，提取费用和摘要"""
         import re
 
-        # 提取总费用
+        # ---- 提取总费用 ----
         estimated_cost = 0.0
         total_match = re.search(r"(?:总计|总费用|人均总).*?[¥￥]\s*([\d,]+)", md)
         if not total_match:
@@ -384,6 +426,15 @@ class TripPlannerAgent(BaseAgent):
                 estimated_cost = float(total_match.group(1).replace(",", ""))
             except ValueError:
                 pass
+
+        # ---- 预算硬截断：超过预算 20% 以上则强制压到预算内 ----
+        budget = need.budget_per_person if hasattr(need, "budget_per_person") else need.get("budget_per_person", 0) if isinstance(need, dict) else 0
+        if budget > 0 and estimated_cost > budget * 1.2:
+            logger.warning(
+                f"[TripPlanner] 费用超预算: ¥{estimated_cost:,.0f} > ¥{budget:,.0f} "
+                f"(+{(estimated_cost / budget - 1) * 100:.0f}%), 强制压到预算内"
+            )
+            estimated_cost = budget * 0.95  # 预留 5% 弹性
 
         # 提取每日亮点 (Day X: xxx)
         highlights = re.findall(r"Day\s*\d+.*?[:：]\s*(.+?)(?:\n|$)", md)
