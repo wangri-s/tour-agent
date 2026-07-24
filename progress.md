@@ -1487,6 +1487,79 @@ except Exception:
 
 ---
 
+## 步骤 33：RAG 全链路配置补全 + 默认旅行社开关 + README 重写
+
+- **时间**：2026-07-25
+- **状态**：✅ 完成
+
+### 33.1 YAML 配置从 ~200 行扩展到 ~480 行
+
+**增强的配置段**：
+
+| 配置段 | 之前 | 之后 |
+|--------|------|------|
+| `milvus` | 6行 (host/port/collection/index) | +连接超时、重试、nlist、nprobe、consistency_level |
+| `embedding` | 5行 (provider/model/dim/batch) | +max_retries、timeout、sleep_interval |
+| `llm` | 12行 (models/params) | +top_p、seed、stream、retries、timeout、retrieval_top_k、system_prompt、rag_prompt_template、fallback_answer |
+| `memory` | 扁平结构 | 重构为嵌套 redis/mysql/kafka 子段，+连接池/重试参数 |
+| `memory.context_compression` | 基础 | +dedup_threshold、llm_summarize_enabled |
+
+**新增的配置段**：
+
+| 配置段 | 行数 | 内容 |
+|--------|------|------|
+| `retrieval` | ~20行 | top_k、score_threshold、hybrid权重、查询预处理、重排序 |
+| `chunking` | ~15行 | strategy、chunk_size、overlap、separators (7级分隔符) |
+| `cache` | ~10行 | 语义缓存 + 工具结果缓存 |
+| `rate_limit` | ~15行 | Token Bucket + LLM成本追踪 + 全局/用户限流 |
+
+### 33.2 Python 代码同步更新
+
+| 文件 | 修改 |
+|------|------|
+| `services/vector_store.py` | 模块级常量→ConfigLoader读取；nprobe/重试次数/超时从YAML读取 |
+| `tools/rag_search.py` | score_threshold/top_k 从 retrieval 段读取 |
+| `services/context_compressor.py` | 窗口大小/压缩比/窗口轮数从 memory 段读取 |
+
+所有读取均有硬编码兜底，配置文件缺失不影响运行。
+
+### 33.3 默认旅行社 YAML 开关
+
+- `config/tour_agent.yaml` `settings.default_agency` — 改一行切换默认旅行社
+- `main.py` 新增 `_resolve_agency()` 辅助函数，空 `agency_id` 时从 YAML 读取
+- 4 处硬编码 `"default"` 统一改为 `_resolve_agency()`
+
+用法：
+```yaml
+settings:
+  default_agency: luxury_travel   # → 重启/热加载后所有请求默认用奢华版
+```
+
+### 33.4 README 重写
+
+- 新增：Weather MCP Server、多旅行社管理、查询改写、上下文保持、中期记忆、统一YAML配置
+- 新增：配置指南（切换默认旅行社/新增旅行社/修改Prompt/修改RAG参数）
+- 新增：API 接口文档（/admin/prompts、/admin/prompts/{id}、/admin/prompts/reload）
+- 新增：全功能测试报告（10项全部通过）
+- 更新：项目结构（config_loader/prompt_manager/mcp_servers/mid_term）
+
+### 33.5 全功能测试验证 (10/10 通过)
+
+```
+✅ Health Check — Redis/Kafka/MySQL/RAG 全部在线
+✅ Admin API — 3家旅行社正确列出
+✅ 身份-默认 — "我是探索中国国际旅行社的旅行顾问"
+✅ 身份-奢华 — "我是尊享之旅国际旅行社的旅行顾问"
+✅ 身份-经济 — "我是青春足迹旅行社的旅行顾问"
+✅ 行程规划-奢华 — 成都3日 ¥4,204/人
+✅ 行程规划-经济 — 西安2日 流式+"🎒"风格
+✅ 纠错改写 — "背景"→"北京" 正确
+✅ 跨Agent保持 — planner→service→planner 3326字完整复述
+✅ 流式SSE — token逐字推送正常
+```
+
+---
+
 ## 待办
 
 - [x] `docker compose up -d` 启动基础设施
