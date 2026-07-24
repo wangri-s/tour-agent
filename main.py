@@ -50,6 +50,17 @@ from services.checkpoint_store import create_postgres_saver_async, shutdown_post
 # MCP Weather Server (Open-Meteo 免费 API)
 from mcp_servers.weather.server import mcp as weather_mcp
 
+
+def _resolve_agency(agency_id: str = "") -> str:
+    """解析旅行社 ID，空值时从 YAML 读取默认旅行社"""
+    if agency_id:
+        return agency_id
+    try:
+        from services.config_loader import config as cfg
+        return cfg.get_str("settings.default_agency", "default")
+    except Exception:
+        return "default"
+
 # LangSmith (LangGraph 官方可观测平台, 自动追踪节点图)
 _LANGSMITH_READY = False
 _langsmith_client: Any = None
@@ -409,7 +420,7 @@ async def chat(req: ChatRequest):
     state: OverallState = {  # type: ignore[assignment]
         "session_id": req.session_id,
         "customer_id": req.customer_id,
-        "agency_id": req.agency_id,
+        "agency_id": _resolve_agency(req.agency_id),
         "channel": req.channel,
         "language": req.language,
         "messages": state_messages,  # type: ignore[list-item]
@@ -417,7 +428,7 @@ async def chat(req: ChatRequest):
 
     config = {"configurable": {"thread_id": req.session_id}}
     logger.info("[API] %s | %s | agency=%s | %s...",
-                req.session_id, req.channel, req.agency_id or "default", req.message[:80])
+                req.session_id, req.channel, _resolve_agency(req.agency_id), req.message[:80])
 
     # ---- 保存用户消息 ----
     if _memory:
@@ -435,7 +446,7 @@ async def chat(req: ChatRequest):
 
     # ---- 调用 LangGraph ----
     from services.prompt_manager import set_current_agency
-    set_current_agency(req.agency_id)
+    set_current_agency(_resolve_agency(req.agency_id))
     assert _graph is not None, "Graph 未初始化 (lifespan 应已编译)"
     try:
         result = await _graph.ainvoke(state, config)
@@ -536,7 +547,7 @@ async def chat_stream(req: ChatRequest):
             state: OverallState = {  # type: ignore[assignment]
                 "session_id": req.session_id,
                 "customer_id": req.customer_id,
-                "agency_id": req.agency_id,
+                "agency_id": _resolve_agency(req.agency_id),
                 "channel": req.channel,
                 "language": req.language,
                 "messages": state_msgs,  # type: ignore[list-item]
@@ -555,7 +566,7 @@ async def chat_stream(req: ChatRequest):
 
             # 执行 graph
             from services.prompt_manager import set_current_agency
-            set_current_agency(req.agency_id)
+            set_current_agency(_resolve_agency(req.agency_id))
             assert _graph is not None, "Graph 未初始化"
             try:
                 result = await _graph.ainvoke(state, config)

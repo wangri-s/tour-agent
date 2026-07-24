@@ -13,6 +13,7 @@ settings:
   version: "0.5.1"
   debug: ${TOUR_AGENT_DEBUG:-false}
   project_name: tour-agent
+  default_agency: default       # ← 改这里切换默认旅行社: default | luxury_travel | budget_travel
 
 # ===========================================================================
 # RAG 检索引擎 — Milvus 向量数据库
