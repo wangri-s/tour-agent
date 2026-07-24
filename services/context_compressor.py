@@ -3,12 +3,13 @@
 策略:
   1. 滑动窗口: 保留最近 N 轮完整消息
   2. 历史压缩: 超出窗口的消息用 LLM 生成渐进式摘要
-  3. Token 估算: 中文 ~1.5 字符/token，硬上限 8000 tokens
-  4. 分层压缩: 短期(最近10轮)完整 + 中期(10-30轮)摘要 + 长期(30轮+)关键信息
+  3. Token 估算: 中文 ~1.5 字符/token
+  4. 压缩阈值: 模型上下文窗口的 65% (qwen-max 8K → 5200 tokens)
+  5. 分层压缩: 短期(最近10轮)完整 + 中期摘要 + 长期关键信息
 
 使用:
     compressor = ContextCompressor()
-    compressed = await compressor.compress(messages, max_tokens=6000)
+    compressed = await compressor.compress(messages, max_tokens=5200)
 """
 
 from __future__ import annotations
@@ -20,9 +21,15 @@ logger = logging.getLogger(__name__)
 
 # Token 估算: 中文约 1.5 字符/token
 CHARS_PER_TOKEN = 1.5
-DEFAULT_MAX_TOKENS = 6000
+
+# 模型上下文窗口 (tokens)
+MODEL_CONTEXT_WINDOW = 8000   # qwen-max / qwen-turbo 均为 8K
+
+# 压缩阈值: 上下文窗口的 65% (留 35% 给输出)
+COMPRESS_RATIO = 0.65
+DEFAULT_MAX_TOKENS = int(MODEL_CONTEXT_WINDOW * COMPRESS_RATIO)  # 5200
+
 RECENT_WINDOW = 10          # 保留最近 10 轮完整消息
-MID_WINDOW = 30             # 10-30 轮生成摘要
 SUMMARY_PROMPT = """请将以下对话历史压缩为简洁摘要，保留关键信息:
 
 关键信息类别:

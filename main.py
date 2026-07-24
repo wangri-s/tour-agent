@@ -301,7 +301,7 @@ async def chat(req: ChatRequest):
     # ---- 上下文加载与压缩 ----
     history_msgs = await _load_history(req.session_id)
     all_messages = history_msgs + [{"role": "user", "content": req.message}]
-    _compressed = await get_compressor().compress(all_messages, req.session_id, max_tokens=6000)
+    _compressed = await get_compressor().compress(all_messages, req.session_id, max_tokens=5200)
 
     # ---- 中期记忆注入 ----
     mid_context = ""
@@ -426,7 +426,7 @@ async def chat_stream(req: ChatRequest):
             # 上下文压缩 + 中期记忆注入
             history_msgs = await _load_history(req.session_id)
             all_messages = history_msgs + [{"role": "user", "content": req.message}]
-            _compressed = await get_compressor().compress(all_messages, req.session_id, max_tokens=6000)
+            _compressed = await get_compressor().compress(all_messages, req.session_id, max_tokens=5200)
 
             mid_context = ""
             if _memory:
