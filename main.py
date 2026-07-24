@@ -42,10 +42,10 @@ from pydantic import BaseModel, Field
 from graph import build_graph
 from graph.state import OverallState
 from services.memory import MemoryOrchestrator
-from langgraph.checkpoint.memory import MemorySaver
 from services.observability import start_trace, end_trace
 from services.context_compressor import get_compressor
 from services.stream_context import set_stream_queue, reset_stream_queue
+from services.checkpoint_store import create_postgres_saver_async, shutdown_postgres_saver
 
 # LangSmith (LangGraph 官方可观测平台, 自动追踪节点图)
 _LANGSMITH_READY = False
@@ -105,15 +105,16 @@ async def lifespan(app: FastAPI):
     )
 
     # 编译 LangGraph (PostgresSaver 优先 → MemorySaver 降级)
-    _graph = build_graph()
-    # 注意: isinstance(x, MemorySaver) 而非 type(MemorySaver)
-    _postgres_checkpoint = not isinstance(_graph.checkpointer, MemorySaver)
+    checkpointer = await create_postgres_saver_async()
+    _graph = build_graph(checkpointer=checkpointer)
+    _postgres_checkpoint = checkpointer is not None
     logger.info("✅ Graph compiled (PostgresCheckpoint=%s), ready to serve.", _postgres_checkpoint)
     yield
 
     # 关闭
     if _memory:
         await _memory.shutdown()
+    await shutdown_postgres_saver()
     logger.info("Shutting down.")
 
 

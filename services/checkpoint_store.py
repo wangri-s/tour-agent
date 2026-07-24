@@ -7,8 +7,8 @@
 
 使用 langgraph-checkpoint-postgres 包。
 
-注意: PostgresSaver.from_conn_string() 返回 context manager，
-必须 __enter__() 后才能调用 setup()。
+注意: ainvoke() 需要 AsyncPostgresSaver (aio 子模块)，
+同步的 PostgresSaver 不支持 async 方法 (aget_tuple 等)。
 """
 
 from __future__ import annotations
@@ -19,17 +19,21 @@ from typing import Any
 
 logger = logging.getLogger(__name__)
 
+# 持有 context manager 引用，shutdown 时退出
+_pg_context: Any = None
 
-def create_postgres_saver_sync() -> Any | None:
-    """创建 PostgresSaver 实例 (同步)
 
-    PostgresSaver.from_conn_string() 返回 _GeneratorContextManager，
-    需要用 __enter__() 取出内部实例后才能 setup()。
+async def create_postgres_saver_async() -> Any | None:
+    """创建 AsyncPostgresSaver 实例
+
+    供 lifespan 调用。Linux/Mac 上直接可用。
+    Windows: psycopg 与 uvicorn ProactorEventLoop 不兼容，自动降级 MemorySaver。
 
     Returns:
-        (saver, context_manager) 元组 或 None
-        context_manager 需在整个应用生命周期保持打开，shutdown 时 __exit__()
+        AsyncPostgresSaver 实例 或 None
     """
+    global _pg_context
+
     pg_url = os.getenv("POSTGRES_URL", "")
     if not pg_url:
         pg_url = os.getenv(
@@ -40,16 +44,24 @@ def create_postgres_saver_sync() -> Any | None:
             logger.info("[Checkpoint] DATABASE_URL 是 MySQL，跳过 PostgresSaver")
             return None
 
-    try:
-        from langgraph.checkpoint.postgres import PostgresSaver
+    import sys as _sys
+    if _sys.platform == "win32":
+        logger.warning(
+            "[Checkpoint] Windows psycopg 与 uvicorn ProactorEventLoop 不兼容，"
+            "使用 MemorySaver。部署到 Linux 后自动启用 PostgresSaver。"
+        )
+        return None
 
-        # from_conn_string 返回 context manager，手动进入
-        cm = PostgresSaver.from_conn_string(pg_url)
-        saver = cm.__enter__()
-        saver.setup()
+    try:
+        from langgraph.checkpoint.postgres.aio import AsyncPostgresSaver
+
+        cm = AsyncPostgresSaver.from_conn_string(pg_url)
+        saver = await cm.__aenter__()
+        await saver.setup()
+        _pg_context = cm
 
         logger.info(
-            "[Checkpoint] PostgresSaver 连接成功 → %s",
+            "[Checkpoint] AsyncPostgresSaver 连接成功 → %s",
             pg_url.split("@")[1] if "@" in pg_url else pg_url,
         )
         return saver
@@ -58,5 +70,22 @@ def create_postgres_saver_sync() -> Any | None:
         logger.warning("[Checkpoint] langgraph-checkpoint-postgres 未安装，使用 MemorySaver")
         return None
     except Exception as e:
-        logger.warning("[Checkpoint] PostgresSaver 连接失败: %s，使用 MemorySaver", e)
+        logger.warning("[Checkpoint] AsyncPostgresSaver 连接失败: %s，使用 MemorySaver", e)
         return None
+
+
+def create_postgres_saver_sync() -> Any | None:
+    """同步版本 — builder.py 降级路径，当前由 lifespan 异步管理"""
+    return None
+
+
+async def shutdown_postgres_saver() -> None:
+    """关闭 PostgresSaver context manager (释放连接池)"""
+    global _pg_context
+    if _pg_context:
+        try:
+            await _pg_context.__aexit__(None, None, None)
+            logger.info("[Checkpoint] AsyncPostgresSaver 已关闭")
+        except Exception as e:
+            logger.warning("[Checkpoint] 关闭失败: %s", e)
+        _pg_context = None
