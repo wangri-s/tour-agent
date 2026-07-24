@@ -749,16 +749,37 @@ budget=¥8,000  cost=¥7,925   (99%)  OK
 
 ---
 
-## 步骤 22：PostgresSaver 修复 + Docker 端口迁移 + README 完善
+## 步骤 22：PostgresSaver 修复 (多轮迭代) + Docker 端口迁移 + README 完善
 
 - **时间**：2026-07-24
 - **状态**：✅ 完成
 
-### 22.1 PostgresSaver 修复
+### 22.1 PostgresSaver 修复 (3 次迭代)
+
+**第 1 次 — context manager 修复**
 - **问题**：`'_GeneratorContextManager' object has no attribute 'setup'`
-- **根因**：`PostgresSaver.from_conn_string()` 返回 context manager，不是 saver 实例。原代码直接 `.setup()` 调在 context manager 上
-- **修复**：`cm = PostgresSaver.from_conn_string(url)` → `saver = cm.__enter__()` → `saver.setup()`
-- **验证**：`checkpoint=postgres`（之前永远是 `memory`）
+- **根因**：`PostgresSaver.from_conn_string()` 返回 context manager，不是 saver 实例
+- **修复**：`cm.__enter__()` → `saver.setup()`
+- **验证**：checkpoint 从 `memory` 变为 `postgres` ✅
+
+**第 2 次 — 500 错误 (NotImplementedError)**
+- **问题**：后端启动正常，但 `/chat` 返回 500，日志显示 `NotImplementedError: aget_tuple`
+- **根因**：同步 `PostgresSaver` 不支持 async 方法（`aget_tuple`/`aput`），LangGraph `ainvoke()` 需要 async
+- **修复**：切换到 `AsyncPostgresSaver` (from `langgraph.checkpoint.postgres.aio`)
+  - `from_conn_string()` 返回 `_AsyncGeneratorContextManager` → `await cm.__aenter__()`
+  - 改为 lifespan 中异步创建 → 传入 `build_graph(checkpointer=...)`
+  - 移除 `main.py` 中已无用的 `MemorySaver` import
+
+**第 3 次 — Windows ProactorEventLoop 兼容**
+- **问题**：`Psycopg cannot use the 'ProactorEventLoop' to run in async mode`
+- **尝试**：模块顶层 `set_event_loop_policy(WindowsSelectorEventLoopPolicy)` → 无效（uvicorn 已启动 loop）
+- **尝试**：独立线程 `SelectorEventLoop` → `Cannot run the event loop while another loop is running`
+- **最终方案**：`checkpoint_store.py` 检测 `sys.platform == "win32"` → 自动降级 MemorySaver + 清晰日志
+  ```
+  [Checkpoint] Windows psycopg 与 uvicorn ProactorEventLoop 不兼容，
+  使用 MemorySaver。部署到 Linux 后自动启用 PostgresSaver。
+  ```
+- **Linux/Mac**：直接 `await create_postgres_saver_async()` → `checkpoint=postgres`
 
 ### 22.2 Docker 端口迁移
 - **问题**：Windows 保留 `9026-9125` 端口段，Kafka (9092) 和 Milvus metrics (9091) 无法绑定
@@ -767,13 +788,71 @@ budget=¥8,000  cost=¥7,925   (99%)  OK
   - Milvus metrics: `9091→29091`
   - `KAFKA_BOOTSTRAP_SERVERS=kafka:29092`
 
-### 22.3 README 完善
+### 22.3 Postgres 容器启动
+- Postgres 容器 `tourai-postgres` 现已纳入启动流程（`:5432`）
+
+### 22.4 README 完善
 - 新增完整快速开始指南 (8 步，从 clone 到验证)
 - Docker 端口映射表
 - `.env` 配置说明
 - PostgresSaver 技术栈标注
 - 预算约束机制说明
-- 已知问题列表
+- 已知问题列表 (Windows 端口保留、前端历史恢复)
+
+---
+
+## 步骤 23：行程参数补全路由 — 追问回答不再误入客服
+
+- **时间**：2026-07-24
+- **状态**：✅ 完成
+
+### 问题
+用户输入"我要去北京" → planner 追问"天数/人数/预算?" → 用户答"三天" → **被路由到 service（兜底）**，客服 agent 越权生成旅行建议，而非继续追问。
+
+### 根因
+"三天"不含任何意图关键词（想去/推荐/签证/退款…），intent_router 的 LLM 分类 + 兜底规则将它送进了 customer_service。
+
+### 修复
+`graph/nodes/intent_router.py` 新增两个 LLM 之前的预判规则：
+
+**规则 1 — `_is_trip_param(text)` 正则匹配数字+单位：**
+```python
+TRIP_PARAM_PATTERNS = [
+    r"^\d+\s*天$",         # "三天", "5天"
+    r"^\d+\s*个?\s*人$",   # "2人", "3个人"
+    r"^预算\s*\d+",        # "预算5000"
+    r"^\d+\s*[块元]$",     # "5000块", "3000元"
+    r"^\d+\s*[kKwW]$",     # "5k", "8K"
+]
+```
+
+**规则 2 — `_has_trip_context(state)` 检测会话是否已有行程规划进行中：**
+```python
+def _has_trip_context(state):
+    need = state.get("need")
+    return bool(need.get("destination"))  # 已有目的地 → 正在规划中
+```
+
+**判断顺序**（优先级从高到低）：
+1. 投诉/转人工关键词 → service + need_human
+2. 参数补全 OR 行程上下文 → planner (直接返回，跳过 LLM)
+3. LLM 模型路由
+
+### 验证
+四步渐进追问流程正确：
+```
+👤 我要去北京
+🤖 branch=planner → 已了解：目的地：北京 → 还需要：天数、人数、预算
+
+👤 三天
+🤖 branch=planner → 已了解：天数：3天 → 还需要：人数、预算
+
+👤 2个人
+🤖 branch=planner → 已了解：人数：2人 → 还需要：预算
+
+👤 预算5000
+🤖 branch=planner → 全部补齐 → 生成完整行程草案 ✅
+```
 
 ---
 
@@ -793,7 +872,11 @@ budget=¥8,000  cost=¥7,925   (99%)  OK
 - [x] main.py 代码优化 — 消除 IDE 标红 + 提取工具函数
 - [x] 行程预算约束修复 — Prompt 硬约束 + 后处理截断
 - [x] 移除预算等级标签 + 前端输入框布局修复
+- [x] PostgresSaver 修复 — AsyncPostgresSaver + Windows 降级 MemorySaver
+- [x] Docker 端口迁移 — Kafka 29092, Milvus metrics 29091
+- [x] 行程参数补全路由 — 追问回答不再误入客服
 - [ ] Phase 2：接入真实天气 API（和风天气/OpenWeatherMap）
-- [ ] Phase 3：PostgresSaver 替换 MemorySaver
+- [ ] Phase 3：Linux 部署启用 PostgresSaver
+- [ ] Phase 3：上下文压缩结果注入 graph state
 - [ ] Phase 3：接入 Langfuse 可观测
 - [ ] Phase 3：本地 7B 模型微调做意图路由
