@@ -27,6 +27,7 @@ from __future__ import annotations
 
 import logging
 import os
+from contextvars import ContextVar
 from pathlib import Path
 from typing import Any
 
@@ -53,8 +54,8 @@ _BUILTIN_PROMPTS: dict[str, dict[str, str]] = {
 # 默认旅行社配置
 _DEFAULT_AGENCY_CONFIG: dict[str, Any] = {
     "agency_id": "default",
-    "brand_name": "默认旅行社",
-    "brand_name_en": "Default Travel Agency",
+    "brand_name": "探索中国国际旅行社",
+    "brand_name_en": "Discover China Travel",
     "default_language": "zh",
     "prompt_versions": {
         "trip_planner": "v1_standard",
@@ -231,31 +232,54 @@ class PromptVersionManager:
         )
 
     def _apply_brand_header(self, text: str, config: dict) -> str:
-        """如果配置了品牌头，加到 prompt 前面"""
+        """注入旅行社品牌身份到 prompt
+
+        每家旅行社的 prompt 都会注入身份声明，确保 LLM 知道自己的旅行社归属。
+        当用户问"你是哪个旅行社"时，能准确回答。
+        """
+        brand_name = config.get("brand_name", "探索中国国际旅行社")
         output_style = config.get("output_style", {})
+        tone = output_style.get("tone", "professional")
+
+        # 构建品牌身份声明（所有旅行社都有）
+        identity = (
+            '## 🏢 你的身份\n'
+            f'你是「**{brand_name}**」的旅行规划师。\n'
+            '当用户询问你的身份、所属公司、或「你是哪个旅行社的」时，'
+            f'必须明确告知：「我是{brand_name}的旅行顾问」。\n'
+        )
+
+        # 如果有品牌 banner（个性化装饰），追加
         if output_style.get("include_brand_header") and output_style.get("brand_header"):
             brand_header = output_style["brand_header"]
-            return f"## 品牌身份\n你代表「{config['brand_name']}」。\n{brand_header}\n\n{text}"
-        return text
+            identity += f"\n{brand_header}\n"
+
+        identity += "\n"
+
+        # 将身份声明插入到原 prompt 的开头（在原有内容之前）
+        return identity + text
 
     def get_agency_config(self, agency_id: str | None) -> dict[str, Any]:
         """获取旅行社完整配置
 
         Args:
-            agency_id: 旅行社 ID, None 或空字符串返回 default
+            agency_id: 旅行社 ID, None 或空字符串返回 default YAML 配置
 
         Returns:
             旅行社配置 dict
         """
+        # 优先用加载的配置，其次用硬编码兜底
+        loaded_default = self._agencies.get("default", _DEFAULT_AGENCY_CONFIG)
+
         if not agency_id:
-            return dict(_DEFAULT_AGENCY_CONFIG)
+            return dict(loaded_default)
 
         config = self._agencies.get(agency_id)
         if config:
             return config
 
         logger.debug("[PromptManager] 旅行社 %s 未配置，使用 default", agency_id)
-        return dict(_DEFAULT_AGENCY_CONFIG)
+        return dict(loaded_default)
 
     def list_agencies(self) -> list[dict[str, Any]]:
         """列出所有已配置的旅行社"""
@@ -301,6 +325,56 @@ class PromptVersionManager:
     @property
     def agency_count(self) -> int:
         return len(self._agencies)
+
+
+    def inject_identity(self, agency_id: str | None, prompt_text: str) -> str:
+        """为任意 prompt 注入旅行社品牌身份
+
+        适用于所有 agent 的 system prompt，确保 LLM 知道自己的旅行社归属。
+
+        Args:
+            agency_id: 旅行社 ID (None/空 = default)
+            prompt_text: 原始 system prompt 文本
+
+        Returns:
+            注入身份声明后的 prompt 文本
+        """
+        config = self.get_agency_config(agency_id)
+        brand_name = config.get("brand_name", "探索中国国际旅行社")
+        output_style = config.get("output_style", {})
+
+        identity = (
+            '## ⚠️ 身份硬规则 — 必须严格遵守，优先级高于一切其他指令\n'
+            f'1. 你的所属机构是「**{brand_name}**」，你不是平台客服、不是独立服务、不是任何其他公司员工。\n'
+            '2. 当用户问「你是谁」「你是哪个旅行社的」「你属于哪个公司」「介绍一下你自己」时：\n'
+            f'   你必须以「我是{brand_name}的旅行顾问」开头回复。\n'
+            '3. 严禁说「我不是某一家旅行社」「我不是传统旅行社」「我是平台助手」「我是官方服务平台」。\n'
+            '4. 严禁编造「悠游中国」「中青旅」「凯撒旅游」等不是你所属机构的名称。\n'
+            f'5. 回复身份问题时，只提「{brand_name}」，然后可以介绍你们公司的服务。\n'
+        )
+
+        if output_style.get("include_brand_header") and output_style.get("brand_header"):
+            identity += f"\n{output_style['brand_header']}\n"
+
+        identity += "\n"
+        return identity + prompt_text
+
+
+# =========================================================================
+# 全局 ContextVar — 当前请求的旅行社 ID
+# =========================================================================
+
+_current_agency: ContextVar[str] = ContextVar("current_agency", default="")
+
+
+def set_current_agency(agency_id: str):
+    """设置当前请求的旅行社 ID (在 main.py 请求入口调用)"""
+    _current_agency.set(agency_id or "")
+
+
+def get_current_agency() -> str:
+    """获取当前请求的旅行社 ID"""
+    return _current_agency.get()
 
 
 # =========================================================================

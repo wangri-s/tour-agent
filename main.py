@@ -429,6 +429,8 @@ async def chat(req: ChatRequest):
     )
 
     # ---- 调用 LangGraph ----
+    from services.prompt_manager import set_current_agency
+    set_current_agency(req.agency_id)
     assert _graph is not None, "Graph 未初始化 (lifespan 应已编译)"
     try:
         result = await _graph.ainvoke(state, config)
@@ -547,6 +549,8 @@ async def chat_stream(req: ChatRequest):
                 )
 
             # 执行 graph
+            from services.prompt_manager import set_current_agency
+            set_current_agency(req.agency_id)
             assert _graph is not None, "Graph 未初始化"
             try:
                 result = await _graph.ainvoke(state, config)
