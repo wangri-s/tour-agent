@@ -25,6 +25,15 @@ TRIP_PARAM_PATTERNS: list[str] = [
     r"^\d+\s*[kKwW]$",       # "5k", "8K"
 ]
 
+# 非行程关键词 — 即使用户在行程规划会话中，这些词也表明用户想问别的事
+# 如身份询问、投诉、FAQ 等，不应路由到 planner
+NON_TRIP_KEYWORDS: list[str] = [
+    "旅行社", "你是", "你是谁", "哪个公司", "什么公司",
+    "投诉", "退款", "取消", "改签", "签证", "入境",
+    "支付", "付款", "支付宝", "微信支付", "汇率",
+    "天气", "安全", "紧急", "报警",
+]
+
 _router = IntentRouterAgent()
 
 
@@ -70,8 +79,13 @@ async def intent_router(state: OverallState) -> PartialState:
         })
 
     # ---- 行程参数补全: 用户正在回答规划师的追问 ----
-    if _is_trip_param(text) or _has_trip_context(state):
-        # 如果是明显的参数补全 OR 会话已有规划上下文 → 直接走 planner
+    # 条件: (参数模式匹配) OR (有行程上下文 AND 不是明显的非行程问题)
+    has_context = _has_trip_context(state)
+    is_param = _is_trip_param(text)
+    is_non_trip = any(kw in text for kw in NON_TRIP_KEYWORDS)
+
+    if is_param or (has_context and not is_non_trip):
+        # 参数补全 或 在规划会话中且不是非行程问题 → 走 planner
         return cast(PartialState, {
             "current_branch": Branch.PLANNER.value,
             "intent_scores": {"planner": 0.9, "service": 0.05, "sales": 0.03, "operations": 0.02},

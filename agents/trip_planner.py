@@ -65,28 +65,49 @@ class TripPlannerAgent(BaseAgent):
         s = self._normalize_state(state)
 
         # =====================================================================
-        # Step 1: 提取 / 补全需求
+        # Step 0: 检查用户是否在请求复述已有的行程
         # =====================================================================
-        raw_need = s["need"]
-        need = raw_need if isinstance(raw_need, TripNeed) else TripNeed(**raw_need)
         raw_draft = s.get("draft", {})
         draft = raw_draft if isinstance(raw_draft, TripDraft) else TripDraft(**raw_draft)
         last_msg = s["messages"][-1].content if s["messages"] else ""
 
+        if draft.itinerary_md and self._is_repeat_request(last_msg):
+            logger.info("[TripPlanner] 用户请求复述已有行程，直接返回 draft (跳过评分/报价)")
+            return {
+                "draft": draft,
+                "need": s["need"],
+                "reply": draft.itinerary_md,
+                "messages": [],
+                "next_action": "accept",  # 跳过 intent_scorer
+                "final_reply": draft.itinerary_md,  # 直接作为最终回复，跳过 quote_agent
+            }
+
+        # =====================================================================
+        # Step 1: 提取 / 补全需求
+        # =====================================================================
+        raw_need = s["need"]
+        need = raw_need if isinstance(raw_need, TripNeed) else TripNeed(**raw_need)
+
         # 如果必填项不完整，先做需求提取
         if not need.is_complete():
-            logger.info("[TripPlanner] 必填项不完整，提取需求...")
-            need = await self._extract_needs(last_msg, need)
-            if not need.is_complete():
-                # 返回追问
-                missing = need.missing_fields()
-                reply = self._build_followup(need, missing)
-                return {
-                    "draft": s["draft"],
-                    "need": need,
-                    "reply": reply,
-                    "messages": [],
-                }
+            # 但如果已有完整的 need 在历史中 (非当前消息能提取到的), 用历史的
+            historic_need = self._find_historic_need(s.get("messages", []))
+            if historic_need and historic_need.is_complete():
+                logger.info("[TripPlanner] 从历史消息恢复完整需求: %s", historic_need.destination)
+                need = historic_need
+            else:
+                logger.info("[TripPlanner] 必填项不完整，提取需求...")
+                need = await self._extract_needs(last_msg, need)
+                if not need.is_complete():
+                    # 返回追问
+                    missing = need.missing_fields()
+                    reply = self._build_followup(need, missing)
+                    return {
+                        "draft": s["draft"],
+                        "need": need,
+                        "reply": reply,
+                        "messages": [],
+                    }
 
         logger.info(
             f"[TripPlanner] 开始规划: {need.destination} "
@@ -325,6 +346,64 @@ class TripPlannerAgent(BaseAgent):
             "guide_per_day": round(total * 0.08 / max(days, 1)),
             "flight_total": round(total * 0.15),  # 国内高铁
         }
+
+    def _is_repeat_request(self, text: str) -> bool:
+        """检测用户是否在请求复述/回顾已有行程"""
+        keywords = [
+            "重复", "再说", "之前", "上面", "看看", "回顾",
+            "给我看看", "发给我", "再看", "再发", "发一下",
+            "repeat", "again", "show me", "previous",
+        ]
+        text_lower = text.lower()
+        return any(kw in text_lower for kw in keywords)
+
+    def _find_historic_need(self, messages: list) -> TripNeed | None:
+        """从历史消息中恢复完整的行程需求 (用于跨 agent 切换后恢复)
+
+        当用户在 planner→service→planner 切换后，当前消息不含完整需求参数，
+        但历史消息中可能有之前提取的完整 TripNeed。
+        这里遍历最近的 assistant 回复，找到包含需求确认的消息来恢复。
+        """
+        import re
+        for msg in reversed(messages):
+            content = msg.content if hasattr(msg, "content") else str(msg)
+            # 查找包含 "已了解"/"已确认" 的需求确认消息
+            if "已了解" not in content and "已确认" not in content:
+                continue
+
+            # 尝试从确认消息中提取参数
+            destination = None
+            days = 0
+            pax = 0
+            arrival_date = ""
+            budget = 0
+
+            m = re.search(r'目的地[：:]\s*(\S+)', content)
+            if m:
+                destination = m.group(1)
+            m = re.search(r'天数[：:]\s*(\d+)', content)
+            if m:
+                days = int(m.group(1))
+            m = re.search(r'人数[：:]\s*(\d+)', content)
+            if m:
+                pax = int(m.group(1))
+            m = re.search(r'日期[：:]\s*(\S+)', content)
+            if m:
+                arrival_date = m.group(1)
+            m = re.search(r'预算[：:].*?¥?\s*(\d[\d,]*)', content)
+            if m:
+                budget = int(m.group(1).replace(",", ""))
+
+            if destination and days > 0:
+                return TripNeed(
+                    destination=destination,
+                    days=days,
+                    pax=pax,
+                    arrival_date=arrival_date,
+                    budget_per_person=budget,
+                )
+
+        return None
 
     def _build_generation_prompt(self, ctx: dict) -> str:
         """构建行程生成提示"""

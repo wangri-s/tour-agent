@@ -95,12 +95,12 @@ def route_requirements(state: OverallState) -> str:
     else:
         draft_has_content = False
 
+    # 已有最终回复 (如复述行程请求) → 直接结束，跳过评分和报价
+    if final_reply:
+        return "END"
     # 已补齐 + 已生成 → 进入评分
     if need_complete and draft_has_content:
         return "intent_scorer"
-    # 已有回复(追问或草稿) → 结束等待用户输入
-    if final_reply:
-        return "END"
     return "trip_planner"
 
 
