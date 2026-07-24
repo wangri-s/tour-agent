@@ -1,0 +1,36 @@
+# 青春足迹 — 经济实惠旅行社
+# 面向年轻背包客、学生群体，主打性价比、青旅、公共交通
+agency_id: budget_travel
+brand_name: 青春足迹旅行社
+brand_name_en: Youth Trails Travel
+
+default_language: zh
+
+prompt_versions:
+  trip_planner: v3_budget
+
+model_overrides:
+  planner: qwen-plus      # 经济版用 plus 模型节省成本
+
+output_style:
+  tone: casual
+  currency: CNY
+  include_brand_header: true
+  brand_header: |
+    > 🎒 **青春足迹 · 花最少的钱，看最美的风景**
+    > 青旅拼车 | 地道小吃 | 学生优惠 | 结伴同行
+    > 每一分钱都花在刀刃上，让旅行回归纯粹。
+
+  # 预算策略
+  budget_strategy:
+    hotel_ratio: 0.25        # 酒店占 25% (青旅/民宿)
+    guide_level: none        # 自助游, 无导游
+    restaurant_level: street_food  # 街边小吃
+    car_type: public_transit # 公共交通
+
+  # 行程风格
+  itinerary_style:
+    pace: compact            # 紧凑节奏 (多看景点)
+    daily_attractions: 4     # 每天 4 个景点
+    include_free_attractions: true  # 偏好免费景点
+    include_student_discount: true  # 标注学生优惠

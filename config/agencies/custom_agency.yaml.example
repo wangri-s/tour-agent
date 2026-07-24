@@ -1,0 +1,39 @@
+# =============================================================================
+# 自定义旅行社配置示例
+# =============================================================================
+# 复制此文件为 my_agency.yaml 即可生效，无需改任何 Python 代码。
+# 修改后调用 POST /admin/prompts/reload 热加载，无需重启服务。
+# =============================================================================
+#
+# agency_id: my_agency
+# brand_name: 我的旅行社
+# brand_name_en: My Travel Agency
+#
+# # ---- 方式一：使用已有版本 ----
+# prompt_versions:
+#   trip_planner: v2_luxury   # 可选: v1_standard / v2_luxury / v3_budget
+#
+# # ---- 方式二：完全自定义 prompt (覆盖任何已有版本) ----
+# prompt_overrides:
+#   trip_planner: |
+#     你是「我的旅行社」的资深旅行规划师。
+#     你的特点是：{在这里写你的自定义人设、风格、规则...}
+#
+# output_style:
+#   tone: professional
+#   currency: CNY
+#   include_brand_header: true
+#   brand_header: |
+#     > 🏝️ **我的旅行社 · 专属定制**
+#     > 特色服务 | 品牌口号 | 联系方式
+#
+#   # 预算策略 (可选)
+#   budget_strategy:
+#     hotel_ratio: 0.40
+#     guide_level: standard
+#     restaurant_level: local_best
+#
+#   # 行程风格 (可选)
+#   itinerary_style:
+#     pace: moderate
+#     daily_attractions: 3

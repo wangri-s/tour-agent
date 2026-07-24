@@ -47,6 +47,9 @@ from services.context_compressor import get_compressor
 from services.stream_context import set_stream_queue, reset_stream_queue
 from services.checkpoint_store import create_postgres_saver_async, shutdown_postgres_saver
 
+# MCP Weather Server (Open-Meteo 免费 API)
+from mcp_servers.weather.server import mcp as weather_mcp
+
 # LangSmith (LangGraph 官方可观测平台, 自动追踪节点图)
 _LANGSMITH_READY = False
 _langsmith_client: Any = None
@@ -109,6 +112,12 @@ async def lifespan(app: FastAPI):
     _graph = build_graph(checkpointer=checkpointer)
     _postgres_checkpoint = checkpointer is not None
     logger.info("✅ Graph compiled (PostgresCheckpoint=%s), ready to serve.", _postgres_checkpoint)
+
+    # 加载 Prompt 版本管理器 (多旅行社支持)
+    from services.prompt_manager import prompt_manager as _pm
+    pm_status = await _pm.load_all()
+    logger.info("📝 Prompt Manager: %d agencies, versions=%s",
+                pm_status["agencies"], pm_status["versions"])
     yield
 
     # 关闭
@@ -133,6 +142,77 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+# 挂载 MCP Weather Server (Open-Meteo, 免费实时天气)
+# 访问: http://127.0.0.1:8002/mcp/weather
+weather_app = weather_mcp.http_app(path="/mcp")
+app.mount("/mcp/weather", weather_app)
+
+
+# =============================================================================
+# Admin API — Prompt 版本管理
+# =============================================================================
+
+@app.get("/admin/prompts")
+async def admin_list_prompts():
+    """查看所有旅行社的 prompt 版本配置"""
+    from services.prompt_manager import prompt_manager as pm
+
+    agencies = []
+    for a in pm.list_agencies():
+        config = pm.get_agency_config(a["agency_id"])
+        agencies.append({
+            "agency_id": a["agency_id"],
+            "brand_name": a["brand_name"],
+            "brand_name_en": a.get("brand_name_en", ""),
+            "prompt_versions": config.get("prompt_versions", {}),
+            "has_override": bool(config.get("prompt_overrides", {})),
+            "tone": config.get("output_style", {}).get("tone", "professional"),
+        })
+
+    versions = pm.list_versions("trip_planner")
+
+    return {
+        "agencies": agencies,
+        "versions": versions,
+        "total_agencies": len(agencies),
+        "total_versions": len(versions),
+    }
+
+
+@app.get("/admin/prompts/{agency_id}")
+async def admin_get_agency_prompt(agency_id: str):
+    """查看某个旅行社的完整 prompt 文本"""
+    from services.prompt_manager import prompt_manager as pm
+
+    config = pm.get_agency_config(agency_id)
+    prompt = pm.get_prompt(agency_id, "trip_planner")
+
+    return {
+        "agency_id": agency_id,
+        "brand_name": config.get("brand_name"),
+        "version": config.get("prompt_versions", {}).get("trip_planner", "v1_standard"),
+        "prompt_length": len(prompt),
+        "prompt_text": prompt,
+        "config": {
+            "output_style": config.get("output_style", {}),
+            "model_overrides": config.get("model_overrides", {}),
+            "has_prompt_override": bool(config.get("prompt_overrides", {})),
+        },
+    }
+
+
+@app.post("/admin/prompts/reload")
+async def admin_reload_prompts():
+    """热加载所有旅行社配置和 prompt 版本 (无需重启服务)"""
+    from services.prompt_manager import prompt_manager as pm
+
+    status = await pm.reload()
+    return {
+        "status": "ok",
+        "message": "配置已重新加载",
+        **status,
+    }
+
 
 # =============================================================================
 # Request / Response
@@ -141,6 +221,11 @@ app.add_middleware(
 class ChatRequest(BaseModel):
     session_id: str = Field(..., description="会话唯一标识", examples=["sess-001"])
     customer_id: str = Field(..., description="客户唯一标识", examples=["c-001"])
+    agency_id: str = Field(
+        default="",
+        description="旅行社 ID (用于 prompt 版本选择), 如 luxury_travel / budget_travel",
+        examples=["luxury_travel"],
+    )
     channel: str = Field(
         default="web",
         description="渠道: whatsapp | wechat | web | messenger | tiktok",
@@ -319,13 +404,15 @@ async def chat(req: ChatRequest):
     state: OverallState = {  # type: ignore[assignment]
         "session_id": req.session_id,
         "customer_id": req.customer_id,
+        "agency_id": req.agency_id,
         "channel": req.channel,
         "language": req.language,
         "messages": state_messages,  # type: ignore[list-item]
     }
 
     config = {"configurable": {"thread_id": req.session_id}}
-    logger.info("[API] %s | %s | %s...", req.session_id, req.channel, req.message[:80])
+    logger.info("[API] %s | %s | agency=%s | %s...",
+                req.session_id, req.channel, req.agency_id or "default", req.message[:80])
 
     # ---- 保存用户消息 ----
     if _memory:
@@ -442,6 +529,7 @@ async def chat_stream(req: ChatRequest):
             state: OverallState = {  # type: ignore[assignment]
                 "session_id": req.session_id,
                 "customer_id": req.customer_id,
+                "agency_id": req.agency_id,
                 "channel": req.channel,
                 "language": req.language,
                 "messages": state_msgs,  # type: ignore[list-item]

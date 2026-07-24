@@ -446,12 +446,16 @@
 - 需要保留客户需求的核心信息：目的地、日期、人数、预算、偏好
 
 ### 14.2 压缩策略
-- **文件**：`services/context_compressor.py` (180行)
+- **文件**：`services/context_compressor.py` (187行)
 - **三层窗口**：
   - **近期窗口 (10轮)**：完整保留，不做任何修改
   - **中期窗口 (10-30轮)**：LLM 生成渐进式摘要（≤300字）
   - **长期窗口 (>30轮)**：关键信息提取（目的地/预算/偏好/变更/情绪）
-- **Token 估算**：中文 ~1.5 字符/token，硬上限默认 6000 tokens
+- **Token 估算**：中文 ~1.5 字符/token
+- **压缩阈值**：模型上下文窗口的 **65%**（留 35% 给输出）
+  - `MODEL_CONTEXT_WINDOW = 8000` (qwen-max 8K)
+  - `DEFAULT_MAX_TOKENS = 5200` (8000 × 0.65)
+  - 以后换模型（如 32K）只改一行 `MODEL_CONTEXT_WINDOW`
 - **摘要合并**：累积摘要自动合并（新+旧 → LLM 合成一段）
 
 ### 14.3 摘要 Prompt 设计
@@ -869,7 +873,8 @@ def _has_trip_context(state):
   - `recover_from_history()`: 计数器过期后从 MySQL 恢复
 
 ### 修改文件
-- **`services/redis_cache.py`**: 新增 `KeyPrefix.MID_TERM` / `ROUND`, `TTL.MID_TERM` (30天) / `ROUND` (7天)
+- **`services/redis_cache.py`**: 新增 `KeyPrefix.MID_TERM` / `ROUND`, `TTL.MID_TERM` (24h) / `ROUND` (24h)
+  - **TTL 24h 原因**: 避免用户量增长时 Redis 被大量旧会话占满内存；过期后自动从 MySQL 联表恢复
 - **`services/memory/short_term.py`**: 新增 `increment_round()` (Redis INCR + 续期) / `get_round()`
 - **`services/memory/orchestrator.py`**:
   - 引入 `MidTermMemory` (`self.mid`)
@@ -877,6 +882,8 @@ def _has_trip_context(state):
   - `maybe_compress_mid_term()`: 每 5 轮触发
   - `_generate_round_summary()`: LLM 压缩 + 旧摘要合并
   - `_recover_if_needed()`: 计数器过期 → MySQL 恢复
+- **`services/memory/long_term.py`**: 新增 `save_summary()` / `get_summaries()` / `count_rounds()` — 中期摘要 MySQL 持久化
+- **`deploy/init.sql`**: 新增 `session_summaries` 表（session_id + round_range + summary + round_count）
 - **`main.py`**:
   - `/chat`: graph 前注入 SystemMessage("[中期记忆]"), graph 后调用 `maybe_compress_mid_term()`
   - `/chat/stream`: 同上
@@ -896,7 +903,340 @@ def _has_trip_context(state):
 发送 6 轮消息:
   Round counter: 6 ✅
   Mid-term entries: 2 (恢复摘要 + 第1-5轮摘要) ✅
-  Round TTL: ~7d ✅ | Mid TTL: ~30d ✅
+  Round TTL: 24h ✅ | Mid TTL: 24h ✅
+  MySQL session_summaries 表: 摘要已持久化 ✅
+  过期恢复: 计数器过期 → MySQL COUNT(user消息) 恢复真实轮数 ✅
+```
+
+---
+
+## 步骤 25：上下文压缩阈值改为模型窗口 65%
+
+- **时间**：2026-07-24
+- **状态**：✅ 完成
+
+### 问题
+压缩阈值硬编码 6000 tokens — 模型换了（如 qwen-max 升级到 32K）仍需手动改。而且 8000 窗口用 6000 做压缩阈值的比例也不合理。
+
+### 修复：动态比例计算
+- **文件**：`services/context_compressor.py`
+- 新增三个配置常量：
+  ```python
+  MODEL_CONTEXT_WINDOW = 8000    # qwen-max 8K, 换模型只改这一行
+  COMPRESS_RATIO = 0.65          # 65% 给输入, 35% 留给 LLM 输出
+  DEFAULT_MAX_TOKENS = 5200      # 8000 × 0.65 = 5200
+  ```
+- **为什么 65% 而不是 70%**：8K 窗口里 LLM 还需要生成回复（行程草案轻松 2000+ tokens），留 35% ≈ 2800 tokens 给输出才不截断
+- **main.py** `/chat` 和 `/chat/stream` 两端同步更新：`max_tokens=6000` → `max_tokens=5200`
+
+### 扩展性
+以后换模型只改一行：
+```python
+MODEL_CONTEXT_WINDOW = 32000   # 新模型 32K → 阈值自动变 20800
+```
+
+---
+
+## 步骤 26：Weather MCP Server — Open-Meteo 实时天气 (替换和风天气)
+
+- **时间**：2026-07-24
+- **状态**：✅ 完成
+
+### 背景
+- 旧版天气方案：和风天气 (QWeather) API → 需要 API Key，免费层 1000次/天
+- 用户要求：**不用和风天气**，改为自己写一个 MCP server
+- 选型：**Open-Meteo** — 完全免费，无需 API Key，全球覆盖，10,000次/天
+
+### 架构设计
+```
+┌─────────────────────────────────────────────────────────────┐
+│                     trip_planner agent                       │
+│                           │                                  │
+│                    mcp_get_weather (LangChain @tool)          │
+│                           │                                  │
+│              ┌────────────┴────────────┐                     │
+│              │   open_meteo.py         │  ← 共享库 (同进程)   │
+│              │   (Open-Meteo API)      │                     │
+│              └────────────┬────────────┘                     │
+│                           │                                  │
+│              ┌────────────┴────────────┐                     │
+│              │   FastMCP Server        │  ← MCP 协议 (外部)   │
+│              │   127.0.0.1:8002/mcp/   │                     │
+│              │   weather               │                     │
+│              └─────────────────────────┘                     │
+│                                                              │
+│  内部调用: 直接走共享库 (零 MCP IPC 开销)                      │
+│  外部调用: MCP 协议 (FastMCP, 挂载在 FastAPI /mcp/weather)     │
+└─────────────────────────────────────────────────────────────┘
+```
+
+### 新增文件
+
+**`mcp_servers/__init__.py`** — MCP 服务器包
+
+**`mcp_servers/weather/__init__.py`** — 导出: mcp, start_server, stop_server, fetch_weather, get_coords
+
+**`mcp_servers/weather/city_coords.py`** (156行) — 城市坐标数据库
+- 30 个中国热门旅游城市 (北京→乌鲁木齐)
+- 15 个国际城市 (东京→迪拜)
+- 别名系统: 支持拼音/英文名/简称 (如 "bj"→北京, "魔都"→上海)
+- `get_coords(city)` — 通过中文/拼音/英文/别名/模糊匹配查经纬度
+- `search_city(query)` — 模糊搜索城市
+
+**`mcp_servers/weather/weather_codes.py`** (131行) — WMO 天气代码库
+- 30 种 WMO 天气代码 → 中文描述 + Emoji + 是否影响出行
+- `get_comfort_level(temp)` — 7 档舒适度 (严寒→酷热)
+- `format_weather_summary()` — 单日天气中文摘要
+- `get_clothing_advice(temp_low, temp_high, code)` — 智能穿衣建议 (含温差提醒)
+
+**`mcp_servers/weather/open_meteo.py`** (300行) — Open-Meteo API 客户端
+- `fetch_weather(lat, lon)` — 调用 Open-Meteo Forecast API
+  - 入参: 经纬度 + 日期范围 + 预报天数
+  - 日期校验: 超过 16 天自动降级查当前 7 天预报
+  - 出参: 当前天气 + 每日预报 (温度/降水/天气代码/风速)
+- `get_weather_for_city(city, start_date, end_date)` — trip_planner 主入口
+  - 流程: 查坐标 → 调 API → 解析结构化数据 → 生成总结 + 穿衣建议
+  - 降级: 城市不在库 → geocoding 在线查找
+- `search_location(name)` — Open-Meteo Geocoding API (在线查经纬度)
+- `close_client()` — 优雅关闭 HTTP 连接
+
+**`mcp_servers/weather/server.py`** (210行) — FastMCP 天气服务器
+- **MCP 工具** (4个):
+  - `get_current_weather(city)` — 当前实时天气
+  - `get_forecast_7days(city, days)` — N 天预报
+  - `get_trip_weather(city, start_date, end_date)` — 行程天气 (trip_planner 专用)
+  - `search_city_weather(query)` — 城市模糊搜索
+- **运行模式**: stdio (开发) / HTTP (生产, 挂载到 FastAPI `/mcp/weather`)
+- **生命周期**: `start_server(port)` / `stop_server()`
+
+**`tools/mcp_weather.py`** (112行) — LangChain @tool 适配层
+- `mcp_get_weather` — 主天气工具 (trip_planner 调用入口)
+- `mcp_search_city` — 城市模糊搜索工具
+- 内部直接调 `open_meteo.py` (同进程, 零 MCP IPC 延迟)
+- 返回格式兼容旧 `get_real_weather` 接口
+
+### 修改文件
+
+**`tools/__init__.py`** — 新增 `mcp_get_weather`, `mcp_search_city` 导出
+
+**`agents/trip_planner.py`** — 天气查询从 `get_real_weather` (和风) 切换为 `mcp_get_weather` (Open-Meteo)
+```python
+# 之前: 和风天气
+weather_data = await get_real_weather.ainvoke({"city": need.destination, "date": need.arrival_date})
+
+# 现在: MCP Open-Meteo
+weather_data = await mcp_get_weather.ainvoke({
+    "city": need.destination,
+    "start_date": need.arrival_date,
+    "forecast_days": max(need.days, 7),
+})
+```
+
+**`main.py`** — 挂载 MCP Weather Server
+```python
+from mcp_servers.weather.server import mcp as weather_mcp
+weather_app = weather_mcp.http_app(path="/mcp")
+app.mount("/mcp/weather", weather_app)
+```
+- MCP Server 与 FastAPI 同进程运行，无需额外启动
+- 外部 MCP 客户端可访问 `http://127.0.0.1:8002/mcp/weather/mcp`
+
+### 数据流
+```
+用户输入 "北京5天 2026-10-20"
+  → trip_planner.plan()
+    → mcp_get_weather.ainvoke({"city": "北京", "start_date": "2026-10-20", ...})
+      → get_weather_for_city("北京", "2026-10-20", ...)
+        → get_coords("北京") → (39.9, 116.4)
+        → fetch_weather(39.9, 116.4, ...) → Open-Meteo API
+        → 解析 → {current: {...}, daily: [...], summary: "...", clothing: "..."}
+      → JSON 返回 (兼容旧格式)
+  → 注入 LLM prompt 上下文
+  → qwen-max 生成天气感知的行程
+```
+
+### 降级策略
+| 场景 | 处理 |
+|------|------|
+| 城市不在内置库 | Geocoding API 在线查找 |
+| Open-Meteo API 不可用 | 返回 error，agent 可用静态气候库兜底 |
+| 日期超出 16 天预报范围 | 自动查当前 7 天预报 + 提示"出行前重新查询" |
+| HTTP 连接超时 | 15s timeout，返回错误 |
+
+### 与旧版对比
+| | 旧版 (和风) | 新版 (MCP Open-Meteo) |
+|---|---|---|
+| **API Key** | 需要 | 不需要 |
+| **免费额度** | 1000次/天 | 10,000次/天 |
+| **城市覆盖** | 28 个 | 45 个内置 + geocoding 在线 |
+| **天气代码** | 和风私有 | WMO 国际标准 |
+| **协议** | HTTP (urllib) | MCP + LangChain @tool |
+| **架构** | 单体 tool | 共享库 + MCP 服务器 |
+| **穿衣建议** | 简单规则 | 温度/湿度/温差/天气综合分析 |
+
+### 验证
+```
+✅ Open-Meteo API: 北京 29.9°C, 多云, 湿度62%
+✅ mcp_get_weather: 成都 40.1°C, 3日预报, 穿衣建议正确
+✅ mcp_search_city: "西" → 西安, "hang" → 杭州
+✅ 日期校验: 超出16天自动降级
+✅ FastAPI mount: /mcp/weather 端点正常
+```
+
+---
+
+## 步骤 27：Prompt 版本管理 — 多旅行社 prompt 定制
+
+- **时间**：2026-07-24
+- **状态**：✅ 完成
+
+### 背景
+同一个旅游定制 Agent 要给不同的旅行社使用：
+- **尊享之旅**：高端客户，五星酒店+私人导游+VIP通道
+- **青春足迹**：背包客/学生，青旅+公交+学生票
+- **默认旅行社**：标准中端客户
+
+每家旅行社需要**不同的 system prompt**（人设、风格、预算策略、输出模板）。
+
+### 架构设计
+```
+请求 (agency_id="luxury_travel")
+  │
+  ├─ config/agencies/luxury_travel.yaml  → prompt_version: v2_luxury
+  │
+  ├─ services/prompt_manager.py          → get_prompt("luxury_travel", "trip_planner")
+  │
+  ├─ prompts/versions/trip_planner_v2.py → PROMPT (2541 chars, 奢华版)
+  │
+  └─ agent 注入 system prompt → LLM 生成奢华风格行程
+```
+
+### 新增文件
+
+**`services/prompt_manager.py`** (230行) — 核心版本管理器
+- `PromptVersionManager` 类：
+  - `load_all()`: 启动时加载所有配置
+  - `get_prompt(agency_id, prompt_name)`: 查询旅行社对应的 prompt 文本
+  - `get_agency_config(agency_id)`: 查询旅行社完整配置
+  - `list_agencies()` / `list_versions()`: 列出已注册的旅行社和版本
+  - `reload()`: 热加载 (无需重启服务)
+- **降级链**: agency 配置 → default 配置 → 内置 v1_standard prompt
+- **品牌注入**: `include_brand_header=true` 时自动在 prompt 前添加品牌身份
+
+**`config/agencies/default.yaml`** — 默认旅行社配置
+```yaml
+agency_id: default
+brand_name: 探索中国国际旅行社
+prompt_versions:
+  trip_planner: v1_standard
+output_style:
+  tone: professional
+  include_brand_header: false
+```
+
+**`config/agencies/luxury_travel.yaml`** — 奢华旅行社配置
+```yaml
+agency_id: luxury_travel
+brand_name: 尊享之旅国际旅行社
+prompt_versions:
+  trip_planner: v2_luxury
+output_style:
+  tone: luxury
+  include_brand_header: true
+  brand_header: "🏨 尊享之旅 · 专属定制 | 私人管家 | 五星酒店 | 专车接送"
+  budget_strategy:
+    hotel_ratio: 0.45       # 酒店占45%
+    guide_level: premium     # 金牌导游
+    restaurant_level: fine_dining
+  itinerary_style:
+    pace: relaxed
+    daily_attractions: 2
+```
+
+**`config/agencies/budget_travel.yaml`** — 经济旅行社配置
+```yaml
+agency_id: budget_travel
+brand_name: 青春足迹旅行社
+prompt_versions:
+  trip_planner: v3_budget
+output_style:
+  tone: casual
+  include_brand_header: true
+  budget_strategy:
+    hotel_ratio: 0.25       # 青旅占25%
+    guide_level: none        # 自助游
+    restaurant_level: street_food
+  itinerary_style:
+    pace: compact
+    daily_attractions: 4
+```
+
+**`prompts/versions/__init__.py`** — 版本注册表 + 元数据
+- `VERSION_META`: 每个版本的名称、描述、目标客户、风格、酒店档位
+
+**`prompts/versions/trip_planner_v1.py`** — v1 标准版
+- 复用现有 `TRIP_PLANNER_PROMPT`，保持向后兼容
+- 人设: 15年经验入境游规划师，四星酒店+打车+特色餐厅
+
+**`prompts/versions/trip_planner_v2.py`** (179行) — v2 奢华版
+- 人设: 20年高端定制经验，服务精英人士
+- 风格: 尊贵典雅，私密性+仪式感+专属性
+- Few-Shot: 北京5日尊享 (故宫VIP+私厨晚宴+奔驰S级)、成都3日奢享 (米其林+丽思卡尔顿)
+- 输出: 🎩 尊享规划思路 + VIP特权表 + 🎁 惊喜时刻
+- 预算: 酒店45% + 餐饮25% + 专车15%
+
+**`prompts/versions/trip_planner_v3.py`** (170行) — v3 经济版
+- 人设: 10年背包环球经验，深谙穷游之道
+- 风格: 轻松活力，花最少的钱看最美的风景
+- Few-Shot: 北京5日穷游 (青旅¥60+地铁¥20+学生票¥30)、成都3日闺蜜游
+- 输出: 🎒 穷游思路 + 💸 省钱清单 + 🆓 免费景点
+- 预算: 住宿25% + 餐饮30% + 交通15% + 门票25%
+
+### 修改文件
+
+**`graph/state.py`** — `OverallState` 和 `PartialState` 新增 `agency_id: str` 字段
+
+**`agents/base.py`** — `call_llm_stream()` 新增 `system` 参数 (可选覆盖默认 system prompt)
+
+**`agents/trip_planner.py`**:
+- `system_prompt()` 改为接受 `agency_id` 参数，委托给 `prompt_manager.get_prompt()`
+- `plan()` 从 state 获取 `agency_id`，传递给 `call_llm_stream(system=...)`
+
+**`main.py`**:
+- `ChatRequest` 新增 `agency_id` 字段
+- `/chat` 和 `/chat/stream` state 构造时传入 `agency_id`
+- lifespan 启动时加载 `prompt_manager`
+
+### 数据流
+```
+POST /chat {"agency_id": "luxury_travel", ...}
+  → state["agency_id"] = "luxury_travel"
+  → trip_planner.plan(state)
+    → agency_id = s.get("agency_id", "")
+    → system_prompt = self.system_prompt("luxury_travel")
+      → prompt_manager.get_prompt("luxury_travel", "trip_planner")
+        → config: {prompt_versions: {trip_planner: "v2_luxury"}}
+        → brand_header prepended: "你代表「尊享之旅国际旅行社」..."
+        → return v2_luxury PROMPT
+    → call_llm_stream(system=system_prompt, ...)
+    → LLM 以奢华规划师身份生成行程
+```
+
+### 扩展方式
+新增旅行社只需两步，无需改代码：
+1. 创建 `config/agencies/{agency_id}.yaml`
+2. 指定 `prompt_versions.trip_planner: v2_luxury` (或已有版本)
+
+新增 prompt 版本只需一步：
+1. 创建 `prompts/versions/trip_planner_v{N}.py`，导出 `PROMPT` 变量
+
+### 验证
+```
+✅ 3 家旅行社加载: default / luxury_travel / budget_travel
+✅ 版本路由: default→v1(3114字), luxury→v2(2541字), budget→v3(2765字)
+✅ 品牌注入: luxury→"尊享之旅·专属定制", budget→"青春足迹·花最少的钱"
+✅ 降级: agency=None→default→v1_standard
+✅ 人设切换: "15年入境游规划师" → "高端奢华规划师" → "背包客规划师"
 ```
 
 ---
@@ -921,8 +1261,9 @@ def _has_trip_context(state):
 - [x] Docker 端口迁移 — Kafka 29092, Milvus metrics 29091
 - [x] 行程参数补全路由 — 追问回答不再误入客服
 - [x] 中期记忆实现 — 隔 5 轮压缩 + Redis 轮次计数器
-- [ ] Phase 2：接入真实天气 API（和风天气/OpenWeatherMap）
+- [x] Phase 2：接入真实天气 API — MCP Server + Open-Meteo (免费, 无需 API Key)
 - [ ] Phase 3：Linux 部署启用 PostgresSaver
 - [ ] Phase 3：上下文压缩结果注入 graph state
 - [ ] Phase 3：接入 Langfuse 可观测
 - [ ] Phase 3：本地 7B 模型微调做意图路由
+- [ ] MCP Server 扩展：酒店预订 / 门票查询 / 汇率查询

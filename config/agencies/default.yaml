@@ -1,0 +1,20 @@
+# 默认旅行社配置 — 所有旅行社的兜底配置
+agency_id: default
+brand_name: 探索中国国际旅行社
+brand_name_en: Discover China Travel
+
+# 默认语言
+default_language: zh
+
+# Prompt 版本选择 (可覆盖 prompt 名称 → 版本号)
+prompt_versions:
+  trip_planner: v1_standard
+
+# 模型覆盖 (空 = 使用全局默认)
+model_overrides: {}
+
+# 输出风格
+output_style:
+  tone: professional          # professional | friendly | luxury | casual
+  currency: CNY
+  include_brand_header: false

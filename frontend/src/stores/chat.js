@@ -11,6 +11,7 @@ const LS_SESSION_ID = 'tourai_session_id'
 const LS_CUSTOMER_ID = 'tourai_customer_id'
 const LS_CHANNEL = 'tourai_channel'
 const LS_LANGUAGE = 'tourai_language'
+const LS_AGENCY_ID = 'tourai_agency_id'
 const LS_SESSIONS = 'tourai_sessions'
 const LS_SESSION_DATA_PREFIX = 'tourai_session_data_'
 
@@ -54,12 +55,14 @@ export const useChatStore = defineStore('chat', () => {
   const customerId = ref(loadPersisted(LS_CUSTOMER_ID, 'guest'))
   const channel = ref(loadPersisted(LS_CHANNEL, 'web'))
   const language = ref(loadPersisted(LS_LANGUAGE, 'zh'))
+  const agencyId = ref(loadPersisted(LS_AGENCY_ID, ''))
 
   // 持久化：值变化时自动写入 localStorage
   watch(sessionId, v => { try { localStorage.setItem(LS_SESSION_ID, v) } catch {} })
   watch(customerId, v => { try { localStorage.setItem(LS_CUSTOMER_ID, v) } catch {} })
   watch(channel, v => { try { localStorage.setItem(LS_CHANNEL, v) } catch {} })
   watch(language, v => { try { localStorage.setItem(LS_LANGUAGE, v) } catch {} })
+  watch(agencyId, v => { try { localStorage.setItem(LS_AGENCY_ID, v) } catch {} })
 
   // ---- 消息 ----
   const messages = ref([])
@@ -219,6 +222,7 @@ export const useChatStore = defineStore('chat', () => {
       {
         session_id: sessionId.value,
         customer_id: customerId.value,
+        agency_id: agencyId.value,
         channel: channel.value,
         message: msg,
         language: language.value,
@@ -300,7 +304,7 @@ export const useChatStore = defineStore('chat', () => {
   }
 
   return {
-    sessionId, customerId, channel, language,
+    sessionId, customerId, channel, language, agencyId,
     messages, loading, error,
     currentDraft, currentQuote, currentBranch, needHuman,
     serverStatus, serverOnline, lastReply,

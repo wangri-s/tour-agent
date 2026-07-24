@@ -8,6 +8,19 @@
       </div>
 
       <div class="field">
+        <label>🏢 旅行社 <span class="hint">（切换 prompt 风格）</span></label>
+        <select v-model="store.agencyId" @change="onAgencyChange">
+          <option value="">默认 (探索中国国际旅行社)</option>
+          <option v-for="a in agencies" :key="a.agency_id" :value="a.agency_id">
+            {{ a.brand_name }}
+          </option>
+        </select>
+        <span class="version-hint" v-if="currentAgencyInfo">
+          📝 {{ currentAgencyInfo.version }} · {{ currentAgencyInfo.tone }}
+        </span>
+      </div>
+
+      <div class="field">
         <label>会话 ID <span class="hint">（刷新不丢失）</span></label>
         <div class="row">
           <input v-model="store.sessionId" />
@@ -48,10 +61,48 @@
 </template>
 
 <script setup>
+import { ref, computed, watch } from 'vue'
 import { useChatStore } from '../stores/chat.js'
+import { fetchAgencies } from '../api/index.js'
+
 defineProps({ open: Boolean })
 defineEmits(['close'])
 const store = useChatStore()
+
+const agencies = ref([])
+
+// 加载旅行社列表
+async function loadAgencies() {
+  try {
+    const data = await fetchAgencies()
+    agencies.value = data.agencies || []
+  } catch {
+    agencies.value = []
+  }
+}
+
+// 打开设置面板时加载
+watch(() => store.sidebarOpen, () => { /* 每次打开面板都会触发 setup */ })
+loadAgencies()
+
+// 当前旅行社信息
+const currentAgencyInfo = computed(() => {
+  if (!store.agencyId) return null
+  const a = agencies.value.find(x => x.agency_id === store.agencyId)
+  if (!a) return null
+  const v = a.prompt_versions?.trip_planner || 'unknown'
+  return { version: v, tone: a.tone || 'professional' }
+})
+
+function onAgencyChange() {
+  // 切换旅行社后提示
+  if (store.agencyId) {
+    const a = agencies.value.find(x => x.agency_id === store.agencyId)
+    if (a) {
+      console.log(`[Settings] 切换到: ${a.brand_name} (${a.prompt_versions?.trip_planner})`)
+    }
+  }
+}
 </script>
 
 <style scoped>
@@ -90,4 +141,5 @@ const store = useChatStore()
 .danger-btn:hover { background: #3e1e1e; }
 .actions { display: flex; gap: 8px; margin-top: 8px; }
 .hint { color: #44cc44; font-size: 10px; }
+.version-hint { color: #8899cc; font-size: 11px; margin-top: -4px; }
 </style>

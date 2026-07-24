@@ -18,14 +18,14 @@ import logging
 from typing import Any
 
 from agents.base import BaseAgent
-from prompts.trip_planner import TRIP_PLANNER_PROMPT
 from graph.state import OverallState, TripDraft, TripNeed
-from tools.get_weather import get_weather  # 降级备用
-from tools.weather_api import get_real_weather  # 真实天气 API
+from tools.get_weather import get_weather  # 降级备用 (静态气候库)
+from tools.mcp_weather import mcp_get_weather  # MCP Open-Meteo 实时天气 (推荐)
 from tools.query_calendar import query_calendar
 from tools.query_inventory import query_inventory
 from tools.rag_search import rag_search
 from services.llm_gateway import gateway_planner, gateway_router
+from services.prompt_manager import prompt_manager
 
 logger = logging.getLogger(__name__)
 
@@ -43,8 +43,9 @@ class TripPlannerAgent(BaseAgent):
         self.llm = gateway_planner
         self.tools = [get_weather, query_calendar, query_inventory, rag_search]
 
-    def system_prompt(self) -> str:
-        return TRIP_PLANNER_PROMPT
+    def system_prompt(self, agency_id: str = "") -> str:
+        """获取当前旅行社对应的 system prompt 版本"""
+        return prompt_manager.get_prompt(agency_id, "trip_planner")
 
     async def plan(self, state: OverallState | dict) -> dict[str, Any]:
         """主规划流程 —— 六步生成完整行程
@@ -95,9 +96,13 @@ class TripPlannerAgent(BaseAgent):
         )
 
         # =====================================================================
-        # Step 2: 并行查询天气(真实API优先→降级内置DB) + 日历 + RAG 知识库
+        # Step 2: 并行查询天气(MCP Open-Meteo 免费API) + 日历 + RAG 知识库
         # =====================================================================
-        weather_data = await get_real_weather.ainvoke({"city": need.destination, "date": need.arrival_date})
+        weather_data = await mcp_get_weather.ainvoke({
+            "city": need.destination,
+            "start_date": need.arrival_date,
+            "forecast_days": max(need.days, 7),  # 至少查 7 天
+        })
         calendar_data = await query_calendar.ainvoke({"date": need.arrival_date})
         faq_data = await rag_search.ainvoke({"query": f"{need.destination} 旅游指南 美食 景点 交通", "top_k": 3})
 
@@ -147,11 +152,17 @@ class TripPlannerAgent(BaseAgent):
         prompt = self._build_generation_prompt(context)
         messages = [{"role": "user", "content": prompt}]
 
+        # 按旅行社 ID 选择 prompt 版本
+        agency_id = s.get("agency_id", "")
+        system_prompt = self.system_prompt(agency_id)
+        logger.info("[TripPlanner] 使用 prompt 版本: agency=%s", agency_id or "default")
+
         # 调用旗舰模型 (qwen-max) — 流式输出
         itinerary_md = await self.call_llm_stream(
             messages=messages,
             temperature=0.8,
             max_tokens=8000,
+            system=system_prompt,
         )
 
         logger.info(f"[TripPlanner] 行程生成完成, 长度: {len(itinerary_md)} 字符")

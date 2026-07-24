@@ -10,11 +10,18 @@ export async function checkHealth() {
   return res.json()
 }
 
-export async function sendMessage({ session_id, customer_id, channel, message, language }) {
+/** 获取可用旅行社列表 */
+export async function fetchAgencies() {
+  const res = await fetch(`${BASE}/admin/prompts`)
+  if (!res.ok) throw new Error(`Failed to fetch agencies: ${res.status}`)
+  return res.json()
+}
+
+export async function sendMessage({ session_id, customer_id, agency_id, channel, message, language }) {
   const res = await fetch(`${BASE}/chat`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ session_id, customer_id, channel, message, language })
+    body: JSON.stringify({ session_id, customer_id, agency_id, channel, message, language })
   })
   if (!res.ok) {
     const err = await res.json().catch(() => ({}))

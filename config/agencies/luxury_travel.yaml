@@ -1,0 +1,36 @@
+# 尊享之旅 — 奢华定制旅行社
+# 面向高净值客户，主打五星级酒店、私人导游、高端体验
+agency_id: luxury_travel
+brand_name: 尊享之旅国际旅行社
+brand_name_en: Luxury Odyssey Travel
+
+default_language: zh
+
+prompt_versions:
+  trip_planner: v2_luxury
+
+model_overrides:
+  planner: qwen-max       # 奢华版用旗舰模型确保品质
+
+output_style:
+  tone: luxury
+  currency: CNY
+  include_brand_header: true
+  brand_header: |
+    > 🏨 **尊享之旅 · 专属定制**
+    > 私人管家 | 五星酒店 | 专车接送 | 24h 礼宾
+    > 每一位客户都是我们的贵宾，每一次旅程都是艺术品。
+
+  # 预算策略 (奢华版预算偏向高端)
+  budget_strategy:
+    hotel_ratio: 0.45        # 酒店占 45% (标准 40%)
+    guide_level: premium     # 金牌导游
+    restaurant_level: fine_dining  # 高端餐厅
+    car_type: luxury_sedan   # 豪华专车
+
+  # 行程风格
+  itinerary_style:
+    pace: relaxed            # 轻松节奏
+    daily_attractions: 2     # 每天 2 个精华景点
+    include_spa: true        # 含 SPA/养生推荐
+    include_vip_tips: true   # VIP 通道提示

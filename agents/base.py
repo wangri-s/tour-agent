@@ -53,11 +53,15 @@ class BaseAgent(ABC):
         tools: list[Any] | None = None,
         temperature: float = 0.7,
         max_tokens: int = 4096,
+        system: str = "",
     ) -> str:
         """流式 LLM 调用 — 边生成边推送到 stream queue，返回完整文本
 
         如果当前上下文存在 stream queue，每个 token 会被推送为 ("token", text) 事件。
         否则退化为普通流式调用（仅返回完整文本）。
+
+        Args:
+            system: 可选 system prompt 覆盖 (空字符串 = 使用默认 self.system_prompt())
         """
         from services.stream_context import get_stream_queue
 
@@ -65,7 +69,7 @@ class BaseAgent(ABC):
         full_text = ""
 
         async for token in self.llm.chat_stream(
-            system=self.system_prompt(),
+            system=system or self.system_prompt(),
             messages=messages,
             temperature=temperature,
             max_tokens=max_tokens,

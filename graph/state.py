@@ -130,6 +130,7 @@ class OverallState(MessagesState):
     # ---- 渠道与会话 ----
     session_id: str = ""
     customer_id: str = ""
+    agency_id: str = ""        # 旅行社 ID (用于 prompt 版本选择)
     channel: str = ""          # Channel 枚举值
     language: str = "zh"
 
@@ -163,6 +164,7 @@ class PartialState(TypedDict, total=False):
     messages: Annotated[list[Any], add_messages]
     session_id: str
     customer_id: str
+    agency_id: str
     channel: str
     language: str
     current_branch: str
