@@ -1241,6 +1241,133 @@ POST /chat {"agency_id": "luxury_travel", ...}
 
 ---
 
+## 步骤 28：旅行社身份注入 — 用户问"你是哪个旅行社"时准确回答
+
+- **时间**：2026-07-24
+- **状态**：✅ 完成
+
+### 问题
+LLM (qwen) 训练数据中有强身份偏见——被问及身份时自称"悠游中国/悦游中国平台助手"，完全忽略 system prompt 中的旅行社品牌。
+
+### 三层修复
+
+**第 1 层 — System Prompt 注入** (`prompt_manager.inject_identity()`)
+```python
+# 所有 agent 的 system prompt 自动加：
+"## ⚠️ 身份硬规则
+1. 你的所属机构是「尊享之旅国际旅行社」
+2. 当用户问身份时必须以此开头回答
+3. 严禁说「我不是某一家旅行社」或「我是平台助手」"
+```
+
+**第 2 层 — 消息级注入** (`BaseAgent._inject_identity_to_messages()`)  
+在用户消息列表前插入 system 消息，比 system prompt 更靠近对话上下文，LLM 无法忽略。
+
+**第 3 层 — 回复后处理** (`BaseAgent._fix_identity_in_reply()`)  
+正则替换 LLM 编造的虚假身份（兜底），匹配多种模式。
+
+### 验证
+```
+默认 → 我是探索中国国际旅行社的旅行顾问 ✅
+尊享之旅 → 我是尊享之旅国际旅行社的旅行顾问 ✅
+青春足迹 → 我是青春足迹旅行社的旅行顾问 ✅
+```
+
+---
+
+## 步骤 29：意图路由修复 — 同会话内 Agent 切换上下文丢失
+
+- **时间**：2026-07-24
+- **状态**：✅ 完成
+
+### 问题 1：非行程问题被误路由到 planner
+`_has_trip_context(state)` 检测到会话有行程上下文后，把所有消息（包括"你是哪个旅行社"）都路由到 planner。
+
+**修复**：`intent_router.py` 新增 `NON_TRIP_KEYWORDS` 排除列表：
+```python
+NON_TRIP_KEYWORDS = [
+    "旅行社", "你是", "你是谁", "哪个公司",
+    "投诉", "退款", "取消", "签证", "支付", ...
+]
+# 路由条件改为: is_param or (has_context and not is_non_trip)
+```
+
+### 问题 2：复述行程请求被报价单覆盖
+用户 planner→service→planner 切换后问"上面说的行程再给我看一遍"，trip_planner 返回了 draft，但 graph 继续走 intent_scorer→quote_agent，报价单覆盖了行程回复。
+
+**修复**：
+- `trip_planner.py`：新增 `_is_repeat_request()` 检测"重复/上面/再看"等关键词 + `_find_historic_need()` 从历史消息恢复需求
+- `routing.py`：`final_reply` 检查提前到评分之前 → 有 final_reply 直接 END
+
+### 问题 3：跨 agent 需求丢失
+用户从 service 切回 planner 时，当前消息不含行程参数，但历史消息中有之前的完整 TripNeed。
+
+**修复**：`_find_historic_need()` — 从历史 assistant 回复中正则提取目的地/天数/人数/日期/预算。
+
+### 验证
+```
+👤 成都3天2人10月出发人均3000
+🤖 [planner] 行程草案 + 报价
+👤 你是哪个旅行社的
+🤖 [service] 我是尊享之旅国际旅行社的旅行顾问
+👤 上面说的行程再给我看一遍
+🤖 [planner] # 🏯 成都 3日深度游行程  ← 完整复述！
+```
+
+---
+
+## 步骤 30：查询改写 — 错别字纠正 + 拼音地名→中文
+
+- **时间**：2026-07-24
+- **状态**：✅ 完成
+
+### 新增文件
+
+**`graph/nodes/query_rewrite.py`** (194行) — 查询改写节点
+
+架构：`input_guard → session_context → query_rewrite → intent_router`
+
+双层纠错策略：
+
+**规则层** (`_quick_fix()`, 零延迟)：
+- 错别字速查表：20 个常见错别字（背景→北京、洗安→西安、成度→成都...）
+- 拼音城市映射：40 个城市（beijing→北京、hangzhou→杭州、tokyo→东京...）
+- 按词边界切分替换，避免把城市名嵌在普通词里也改了
+
+**LLM 层** (`_llm_rewrite()`, qwen-turbo, 3s 超时)：
+- 规则层没命中时调用
+- 高度约束的 prompt：仅纠正明显同音错字，不改语义
+- `asyncio.wait_for(timeout=3.0)` 兜底，超时跳过
+
+### 修改文件
+- **`graph/builder.py`**：新增 `query_rewrite` 节点，插入 `session_context → intent_router` 之间
+
+### 验证 (6/6 通过)
+```
+背景旅游 → 北京 ✅
+三个银去悲伤 → 三人去北京 ✅
+hangzhou → 杭州 ✅
+成度 → 成都 ✅
+洗安 → 西安 ✅
+签证政策 → 不改写 ✅
+```
+
+---
+
+## 步骤 31：v3_budget 标题模板修复 + 前端代理完善
+
+- **时间**：2026-07-24
+- **状态**：✅ 完成
+
+### v3 prompt 模板修复
+- **问题**：`{目的地}` 占位符太模糊，LLM 偶发编造单字"大"代替城市全名
+- **修复**：模板中增加明确指令："标题中的 {目的地} 必须替换为客户真实城市全名，严禁简称、单字或编造，直接从「客户需求」中复制"
+
+### 前端代理
+- `vite.config.js` 新增 `/admin` 代理到后端
+
+---
+
 ## 待办
 
 - [x] `docker compose up -d` 启动基础设施
