@@ -749,6 +749,34 @@ budget=¥8,000  cost=¥7,925   (99%)  OK
 
 ---
 
+## 步骤 22：PostgresSaver 修复 + Docker 端口迁移 + README 完善
+
+- **时间**：2026-07-24
+- **状态**：✅ 完成
+
+### 22.1 PostgresSaver 修复
+- **问题**：`'_GeneratorContextManager' object has no attribute 'setup'`
+- **根因**：`PostgresSaver.from_conn_string()` 返回 context manager，不是 saver 实例。原代码直接 `.setup()` 调在 context manager 上
+- **修复**：`cm = PostgresSaver.from_conn_string(url)` → `saver = cm.__enter__()` → `saver.setup()`
+- **验证**：`checkpoint=postgres`（之前永远是 `memory`）
+
+### 22.2 Docker 端口迁移
+- **问题**：Windows 保留 `9026-9125` 端口段，Kafka (9092) 和 Milvus metrics (9091) 无法绑定
+- **修复**：
+  - Kafka: `9092→29092` (docker-compose + kafka_broker.py 默认值)
+  - Milvus metrics: `9091→29091`
+  - `KAFKA_BOOTSTRAP_SERVERS=kafka:29092`
+
+### 22.3 README 完善
+- 新增完整快速开始指南 (8 步，从 clone 到验证)
+- Docker 端口映射表
+- `.env` 配置说明
+- PostgresSaver 技术栈标注
+- 预算约束机制说明
+- 已知问题列表
+
+---
+
 ## 待办
 
 - [x] `docker compose up -d` 启动基础设施
