@@ -17,16 +17,29 @@ from typing import Any
 
 logger = logging.getLogger(__name__)
 
+# 从统一配置读取，缺失时回退硬编码默认值
+def _get_config():
+    try:
+        from services.config_loader import config as cfg
+        if cfg.is_loaded or cfg.load():
+            return cfg
+    except Exception:
+        pass
+    return None
+
+_cfg = _get_config()
+
 # DashScope Embedding 常量
-EMBEDDING_DIM = 1024          # text-embedding-v3 输出维度
-EMBEDDING_MODEL = "text-embedding-v3"
-EMBEDDING_BATCH_SIZE = 25     # DashScope 单次最多 25 条
+EMBEDDING_DIM = _cfg.get_int("embedding.dimensions", 1024) if _cfg else 1024
+EMBEDDING_MODEL = _cfg.get_str("embedding.model", "text-embedding-v3") if _cfg else "text-embedding-v3"
+EMBEDDING_BATCH_SIZE = _cfg.get_int("embedding.batch_size", 25) if _cfg else 25
 
 # Milvus 集合常量
-DEFAULT_COLLECTION = "travel_knowledge"
-METRIC_TYPE = "COSINE"        # 余弦相似度，适合语义搜索
-INDEX_TYPE = "IVF_FLAT"       # 倒排索引，百万级均衡选择
-NLIST = 128                   # IVF 聚类中心数
+DEFAULT_COLLECTION = _cfg.get_str("milvus.collection_name", "travel_knowledge") if _cfg else "travel_knowledge"
+METRIC_TYPE = _cfg.get_str("milvus.metric_type", "COSINE") if _cfg else "COSINE"
+INDEX_TYPE = _cfg.get_str("milvus.index_type", "IVF_FLAT") if _cfg else "IVF_FLAT"
+NLIST = _cfg.get_int("milvus.index_params.nlist", 128) if _cfg else 128
+NPROBE = _cfg.get_int("milvus.search_params.nprobe", 16) if _cfg else 16
 
 
 class MilvusStore:
@@ -236,7 +249,7 @@ class MilvusStore:
         try:
             search_params = {
                 "metric_type": METRIC_TYPE,
-                "params": {"nprobe": 16},
+                "params": {"nprobe": NPROBE},
             }
 
             expr = None
@@ -327,12 +340,28 @@ class EmbeddingService:
     """
 
     def __init__(self, api_key: str | None = None):
-        self.api_key = api_key or os.getenv("DASHSCOPE_API_KEY") or os.getenv("OPENAI_API_KEY") or ""
-        self.base_url = os.getenv(
-            "DASHSCOPE_BASE_URL",
-            "https://dashscope.aliyuncs.com/compatible-mode/v1",
-        )
-        self.model = EMBEDDING_MODEL
+        # 优先从 config 读取
+        _cfg_local = _get_config()
+        if _cfg_local:
+            self.api_key = api_key or _cfg_local.get_str("llm.api_key") or os.getenv("DASHSCOPE_API_KEY") or os.getenv("OPENAI_API_KEY") or ""
+            self.base_url = _cfg_local.get_str("llm.base_url") or os.getenv(
+                "DASHSCOPE_BASE_URL",
+                "https://dashscope.aliyuncs.com/compatible-mode/v1",
+            )
+            self.model = _cfg_local.get_str("embedding.model", EMBEDDING_MODEL)
+            self._max_retries = _cfg_local.get_int("embedding.max_retries", 3)
+            self._timeout = _cfg_local.get_int("embedding.timeout", 30)
+            self._sleep_interval = _cfg_local.get_float("embedding.sleep_interval", 1.0)
+        else:
+            self.api_key = api_key or os.getenv("DASHSCOPE_API_KEY") or os.getenv("OPENAI_API_KEY") or ""
+            self.base_url = os.getenv(
+                "DASHSCOPE_BASE_URL",
+                "https://dashscope.aliyuncs.com/compatible-mode/v1",
+            )
+            self.model = EMBEDDING_MODEL
+            self._max_retries = 3
+            self._timeout = 30
+            self._sleep_interval = 1.0
 
     async def embed(self, texts: str | list[str]) -> list[list[float]]:
         """文本向量化
@@ -365,7 +394,7 @@ class EmbeddingService:
         import urllib.request
         import urllib.error
 
-        for attempt in range(3):
+        for attempt in range(self._max_retries):
             try:
                 body = json.dumps({
                     "model": self.model,
@@ -384,12 +413,14 @@ class EmbeddingService:
                     headers=headers,
                 )
 
-                with urllib.request.urlopen(req, timeout=30) as resp:
+                with urllib.request.urlopen(req, timeout=self._timeout) as resp:
                     data = json.loads(resp.read().decode("utf-8"))
 
                 if data.get("code") != "" and data.get("code") is not None:
                     logger.error(f"[Embedding] API 错误: {data.get('code')} - {data.get('message')}")
-                    if attempt < 2:
+                    if attempt < self._max_retries - 1:
+                        import asyncio
+                        await asyncio.sleep(self._sleep_interval * (attempt + 1))
                         continue
                     return []
 
@@ -402,16 +433,16 @@ class EmbeddingService:
 
             except urllib.error.HTTPError as e:
                 logger.error(f"[Embedding] HTTP {e.code}: {e.reason}")
-                if attempt < 2:
+                if attempt < self._max_retries - 1:
                     import asyncio
-                    await asyncio.sleep(1 * (attempt + 1))
+                    await asyncio.sleep(self._sleep_interval * (attempt + 1))
                     continue
                 return []
             except Exception as e:
                 logger.error(f"[Embedding] 请求失败: {e}")
-                if attempt < 2:
+                if attempt < self._max_retries - 1:
                     import asyncio
-                    await asyncio.sleep(1 * (attempt + 1))
+                    await asyncio.sleep(self._sleep_interval * (attempt + 1))
                     continue
                 return []
 
@@ -423,7 +454,7 @@ class EmbeddingService:
         import urllib.request
         import urllib.error
 
-        for attempt in range(3):
+        for attempt in range(self._max_retries):
             try:
                 body = json.dumps({
                     "model": self.model,
@@ -442,7 +473,7 @@ class EmbeddingService:
                     headers=headers,
                 )
 
-                with urllib.request.urlopen(req, timeout=30) as resp:
+                with urllib.request.urlopen(req, timeout=self._timeout) as resp:
                     data = json.loads(resp.read().decode("utf-8"))
 
                 embeddings = data.get("output", {}).get("embeddings", [])
@@ -453,9 +484,9 @@ class EmbeddingService:
 
             except Exception as e:
                 logger.error(f"[Embedding] 查询向量化失败: {e}")
-                if attempt < 2:
+                if attempt < self._max_retries - 1:
                     import asyncio
-                    await asyncio.sleep(1 * (attempt + 1))
+                    await asyncio.sleep(self._sleep_interval * (attempt + 1))
                     continue
                 return None
 

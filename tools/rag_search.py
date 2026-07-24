@@ -29,6 +29,18 @@ from services.redis_cache import redis_cache
 logger = logging.getLogger(__name__)
 
 
+def _get_retrieval_config():
+    """从统一配置读取检索参数，缺失时回退默认值"""
+    try:
+        from services.config_loader import config as cfg
+        return {
+            "top_k": cfg.get_int("retrieval.top_k", 5),
+            "score_threshold": cfg.get_float("retrieval.score_threshold", 0.3),
+        }
+    except Exception:
+        return {"top_k": 5, "score_threshold": 0.3}
+
+
 @tool
 async def rag_search(query: str, top_k: int = 5, category: str = "") -> str:
     """检索中国入境游知识库 (RAG 语义搜索)。
@@ -51,6 +63,11 @@ async def rag_search(query: str, top_k: int = 5, category: str = "") -> str:
         [{doc_id, title, category, content, score}, ...]
     """
     try:
+        # 从统一配置读取检索参数
+        ret_cfg = _get_retrieval_config()
+        default_top_k = ret_cfg["top_k"]
+        default_threshold = ret_cfg["score_threshold"]
+
         # Step 1: 检查 Redis 缓存
         cache_key = _cache_key(query, top_k, category)
         cached = await redis_cache.get_tool_cache("rag_search", cache_key)
@@ -68,8 +85,8 @@ async def rag_search(query: str, top_k: int = 5, category: str = "") -> str:
         filter_cat = category if category else None
         docs = await milvus_store.search(
             query_vector=query_vector,
-            top_k=top_k,
-            score_threshold=0.3,
+            top_k=top_k if top_k != 5 else default_top_k,
+            score_threshold=default_threshold,
             filter_category=filter_cat,
         )
 

@@ -19,17 +19,37 @@ from typing import Any
 
 logger = logging.getLogger(__name__)
 
+# 从统一配置读取压缩参数，缺失时回退硬编码默认值
+def _get_compression_config():
+    try:
+        from services.config_loader import config as cfg
+        return {
+            "chars_per_token": cfg.get_float("memory.context_compression.chars_per_token", 1.5),
+            "model_context_window": cfg.get_int("memory.context_compression.model_context_window", 8000),
+            "compress_ratio": cfg.get_float("memory.context_compression.compress_ratio", 0.65),
+            "recent_window": cfg.get_int("memory.context_compression.recent_window", 10),
+        }
+    except Exception:
+        return {
+            "chars_per_token": 1.5,
+            "model_context_window": 8000,
+            "compress_ratio": 0.65,
+            "recent_window": 10,
+        }
+
+_comp_cfg = _get_compression_config()
+
 # Token 估算: 中文约 1.5 字符/token
-CHARS_PER_TOKEN = 1.5
+CHARS_PER_TOKEN = _comp_cfg["chars_per_token"]
 
 # 模型上下文窗口 (tokens)
-MODEL_CONTEXT_WINDOW = 8000   # qwen-max / qwen-turbo 均为 8K
+MODEL_CONTEXT_WINDOW = _comp_cfg["model_context_window"]
 
 # 压缩阈值: 上下文窗口的 65% (留 35% 给输出)
-COMPRESS_RATIO = 0.65
-DEFAULT_MAX_TOKENS = int(MODEL_CONTEXT_WINDOW * COMPRESS_RATIO)  # 5200
+COMPRESS_RATIO = _comp_cfg["compress_ratio"]
+DEFAULT_MAX_TOKENS = int(MODEL_CONTEXT_WINDOW * COMPRESS_RATIO)
 
-RECENT_WINDOW = 10          # 保留最近 10 轮完整消息
+RECENT_WINDOW = _comp_cfg["recent_window"]
 SUMMARY_PROMPT = """请将以下对话历史压缩为简洁摘要，保留关键信息:
 
 关键信息类别:

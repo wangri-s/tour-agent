@@ -1,7 +1,7 @@
 # =============================================================================
 # tour-agent 统一配置文件
 # =============================================================================
-# 所有配置集中管理：LLM、数据库、记忆系统、Prompt、旅行社。
+# 所有配置集中管理：LLM、RAG、记忆系统、Prompt、旅行社。
 # 支持 ${ENV_VAR:-default} 语法读取环境变量。
 # 修改后 POST /admin/prompts/reload 热加载，无需重启。
 # =============================================================================
@@ -14,9 +14,51 @@ settings:
   debug: ${TOUR_AGENT_DEBUG:-false}
   project_name: tour-agent
 
-# ---------------------------------------------------------------------------
-# LLM 模型配置
-# ---------------------------------------------------------------------------
+# ===========================================================================
+# RAG 检索引擎 — Milvus 向量数据库
+# ===========================================================================
+
+milvus:
+  host: ${MILVUS_HOST:-localhost}
+  port: ${MILVUS_PORT:-19530}
+  collection_name: travel_knowledge
+  vector_dim: 1024
+
+  # ---------- 连接 ----------
+  timeout: 30                   # 连接超时（秒）
+  max_retries: 3                # 失败重试次数
+
+  # ---------- 索引 ----------
+  metric_type: COSINE           # 余弦相似度（适合语义搜索）
+  index_type: IVF_FLAT          # 倒排索引 + 平坦量化
+  index_params:
+    nlist: 128                  # 聚类数 ≈ sqrt(总向量数) × 4
+
+  # ---------- 搜索 ----------
+  search_params:
+    nprobe: 16                  # 搜索时探测的聚类数，越大精度越高速度越慢
+  consistency_level: "Strong"   # Strong | Bounded | Session | Eventually
+
+# ===========================================================================
+# Embedding 向量化 — DashScope text-embedding-v3
+# ===========================================================================
+
+embedding:
+  provider: dashscope
+  model: text-embedding-v3
+  dashscope_api_key: ${DASHSCOPE_API_KEY}
+  dimensions: 1024              # 输出向量维度（与 milvus.vector_dim 一致）
+  batch_size: 25                # 每批处理文本数（DashScope 单次上限 25）
+
+  # ---------- API 调用控制 ----------
+  max_retries: 3                # 失败重试
+  timeout: 30                   # 请求超时（秒）
+  sleep_interval: 1             # 批量调用间隔（秒），避免触发限流
+
+# ===========================================================================
+# LLM 模型配置 — 千问 (DashScope OpenAI 兼容协议)
+# ===========================================================================
+
 llm:
   provider: dashscope
   api_key: ${DASHSCOPE_API_KEY}
@@ -24,74 +66,239 @@ llm:
 
   models:
     default: ${LLM_MODEL:-qwen-plus}
-    planner: qwen-max          # 旅游定制 (复杂推理)
-    router: qwen-turbo         # 意图路由 (轻量快速)
-    compressor: qwen-turbo     # 上下文压缩
+    planner: qwen-max            # 旅游定制 (复杂推理)
+    router: qwen-turbo           # 意图路由 (轻量快速)
+    compressor: qwen-turbo       # 上下文压缩
 
+  # ---------- 生成控制 ----------
   params:
     default_temperature: 0.7
-    router_temperature: 0.1    # 路由需要低温度保证一致性
+    router_temperature: 0.1      # 路由需要低温度保证一致性
+    scorer_temperature: 0.3      # 意图评分/摘要
     default_max_tokens: 4096
-    planner_max_tokens: 8000   # 行程生成需要更多输出空间
+    planner_max_tokens: 8000     # 行程生成需要更多输出空间
     compressor_max_tokens: 500
+    top_p: 0.8                   # 核采样（0~1），控制随机性
+    seed: 42                     # 随机种子，保证结果可复现
+    stream: true                 # 是否默认启用流式输出
+
+  # ---------- 连接 ----------
+  max_retries: 3                # 失败重试次数
+  timeout: 60                   # 请求超时（秒）
+
+  # ---------- RAG 检索参数 ----------
+  retrieval_top_k: 5            # 检索返回的 chunk 数，填入 Prompt
+
+  # ---------- 旅游规划专家 System Prompt（兜底，通常由旅行社 prompt 覆盖）----------
+  system_prompt: |
+    你是一位拥有 15 年经验的中国入境游资深规划师。
+
+    【职责范围】
+    - 基于客户需求生成定制化中国旅游行程
+    - 结合实时天气、节假日、景点开放情况给出建议
+    - 提供准确的费用预估和实用旅行贴士
+
+    【核心设计原则】
+    - 大交通判断：入境游含国际机票，国内游用高铁替代
+    - 节奏控制：轻松（2景点/天）| 适中（3景点/天）| 紧凑（4-5景点/天）
+    - 预算匹配：经济→三星+公交 | 舒适→四星+打车 | 奢华→五星+专车
+    - 天气应对：雨季→室内优先 | 高温→避开12-15点 | 严寒→室内+冰雪平衡
+
+    【输出要求】
+    - 使用 Markdown 格式，包含行程概览、每日安排、费用预估、实用贴士
+    - 费用表严格按客户预算分配
+    - 优先引用知识库中最新的景点/酒店/交通信息
+
+  # ---------- RAG Prompt 模板 ----------
+  # {context} 会被替换为检索到的 chunks
+  # {question} 会被替换为用户问题
+  rag_prompt_template: |
+    请根据以下中国旅游知识库内容，回答用户问题。
+
+    【参考知识】
+    {context}
+
+    【用户需求】
+    {question}
+
+    【回答要求】
+    1. 优先使用知识库中的最新信息（景点开放时间、门票价格、交通方式）
+    2. 如果知识库中有签证/免签政策，务必准确引用
+    3. 结合天气和节假日信息给出出行建议
+    4. 费用预估要基于知识库中的价格参考
+
+  # ---------- 兜底（无检索结果时）----------
+  fallback_answer: "抱歉，知识库中未找到与您问题相关的信息。建议：1）尝试用不同关键词描述；2）联系客服获取人工帮助。"
+
+# ===========================================================================
+# 检索策略 — RAG 查询参数
+# ===========================================================================
+
+retrieval:
+  top_k: 5                      # 默认返回条数
+  score_threshold: 0.3          # 相似度阈值，低于此值丢弃（COSINE: 0~1）
+  default_mode: semantic        # 默认检索模式: semantic | keyword | hybrid
+
+  # ---------- 混合检索权重 ----------
+  hybrid:
+    dense_weight: 0.5           # 语义权重（0~1）
+    sparse_weight: 0.5          # 关键字权重（0~1）
+
+  # ---------- 查询预处理 ----------
+  query_preprocess:
+    enabled: true               # 是否启用查询预处理（已由 query_rewrite 节点处理）
+    rewrite: true               # 查询改写（口语→关键词、错别字纠正）
+    multi_query: false          # 多路查询扩展（生成多个变体）
+    multi_query_n: 3            # 多路扩展变体数
+
+  # ---------- 重排序 ----------
+  rerank:
+    enabled: false              # 是否启用重排序（需额外模型调用）
+    model: qwen3-rerank         # 重排序模型
+    oversample_factor: 3        # 初检倍数（初检 top_k × factor 条，重排后取 top_k 条）
+    max_retries: 3
+    timeout: 30
+
+# ===========================================================================
+# 文档分块策略 — 知识库索引参数
+# ===========================================================================
+
+chunking:
+  # ---------- 分块策略 ----------
+  strategy: heading             # heading | recursive | semantic | fixed
+  chunk_size: 1500              # 每块最大字符数（按 ## 标题边界自然切分）
+  chunk_overlap: 50             # 相邻块重叠字符数
+  min_chunk_length: 20          # 丢弃短于此值的块
+
+  # ---------- 分隔符（按优先级从高到低）----------
+  separators:
+    - "\n## "                   # 二级标题（文档主边界）
+    - "\n### "                  # 三级标题（子切分边界）
+    - "\n\n"                    # 双换行（段落边界）
+    - "\n"                      # 单换行
+    - "。"                      # 中文句号
+    - "；"                      # 中文分号
+    - " "                       # 空格（最后兜底）
+
+# ===========================================================================
+# 三级记忆系统 — Redis 短期 + Kafka 消息队列 + MySQL 长期
+# ===========================================================================
+
+memory:
+  # ---------- 短期记忆（Redis）----------
+  short_term:
+    max_messages: 50            # 每个会话最多保留消息数
+
+  # ---------- 中期记忆（摘要压缩）----------
+  mid_term:
+    enabled: true
+    compress_interval: 5        # 每 N 轮触发一次摘要压缩
+    max_summaries: 5            # Redis 中最多保留的摘要段数
+    summary_max_chars: 300      # 摘要最大字符数
+    compress_model: qwen-turbo  # 压缩使用的模型
+
+  # ---------- 上下文压缩 — 防止超出 LLM 窗口 ----------
+  context_compression:
+    enabled: true
+    model_context_window: 8000     # qwen-max 8K 上下文窗口
+    compress_ratio: 0.65           # 窗口 65% 给输入, 35% 给输出
+    max_tokens: 5200               # = 8000 × 0.65
+    recent_window: 10              # 保留最近 N 轮完整消息
+    chars_per_token: 1.5           # 中文 ~1.5 字符/token
+    dedup_threshold: 0.7           # 去重: Jaccard 相似度阈值
+    llm_summarize_enabled: true    # 是否允许 LLM 压缩上下文（额外 1 次 LLM 调用）
+
+  # ---------- Redis 连接 ----------
+  redis:
+    host: ${REDIS_HOST:-localhost}
+    port: ${REDIS_PORT:-6379}
+    db: 0
+    password: ${REDIS_PASSWORD:-}
+    key_prefix: tourai
+    max_connections: 20          # 连接池大小
+    socket_timeout: 5            # 读写超时（秒）
+    socket_connect_timeout: 3    # 连接超时（秒）
+    retry_on_timeout: true
+
+    # TTL 配置 (秒)
+    ttl:
+      session: 1800        # 会话上下文 (30min)
+      customer: 86400      # 客户画像 (24h)
+      rate_limit: 60       # 频率限制窗口 (1min)
+      agent_state: 300     # Agent 临时状态 (5min)
+      tool_cache: 600      # 工具缓存 (10min)
+      trip_draft: 3600     # 行程草稿 (1h)
+      lock: 30             # 分布式锁 (30s)
+      mid_term: 86400      # 中期摘要 (24h, 过期从MySQL恢复)
+      round: 86400         # 轮次计数器 (24h, 过期从MySQL恢复)
+
+  # ---------- 长期记忆（MySQL）----------
+  mysql:
+    url: ${MYSQL_URL:-mysql://tourai:tourai123@localhost:3306/tourai}
+    host: ${MYSQL_HOST:-localhost}
+    port: ${MYSQL_PORT:-3307}
+    user: ${MYSQL_USER:-root}
+    password: ${MYSQL_PASSWORD:-tourai123}
+    database: ${MYSQL_DATABASE:-tourai}
+    charset: utf8mb4
+    pool_size: 5                 # 连接池大小
+    max_retries: 3               # 写入失败最大重试次数
+    retry_base_delay: 0.5        # 重试基础延迟（秒），指数退避: 0.5→1→2→4
+    retry_max_delay: 5.0         # 重试延迟上限（秒）
+
+  # ---------- 消息队列（Kafka）----------
+  kafka:
+    bootstrap_servers: ${KAFKA_BOOTSTRAP_SERVERS:-localhost:29092}
+    consumer_group: tour-agent-memory
+    max_retries: 3               # 发送失败最大重试次数
+    retry_base_delay: 0.5        # 重试基础延迟（秒）
+    retry_max_delay: 5.0         # 重试延迟上限（秒）
+    topics:
+      agent_events: agent-events
+      trip_tasks: trip-tasks
+      crm_sync: crm-sync
+      capi_send: capi-send
+      analytics: analytics
+      notifications: notifications
+
+# ===========================================================================
+# 语义缓存 — 相同/相似问题跳过 LLM，直接返回缓存答案
+# ===========================================================================
+
+cache:
+  enabled: true                  # 是否启用语义缓存
+  similarity_threshold: 0.95     # 余弦相似度阈值（0~1），超过视为相同问题
+  max_entries: 100               # 最多缓存 100 条 Q&A（LRU 淘汰）
+  ttl: 3600                      # 缓存过期时间（秒），默认 1 小时
+
+  # ---------- 工具结果缓存 ----------
+  tool_cache_enabled: true       # 工具调用结果缓存（天气、RAG搜索等）
+  tool_cache_ttl: 600            # 工具缓存 TTL（秒），默认 10 分钟
+
+# ===========================================================================
+# 限流与配额管理 — Token Bucket + LLM 成本追踪
+# ===========================================================================
+
+rate_limit:
+  enabled: true                  # 总开关，false 则所有限流放行
+
+  # ---------- 全局限流 ----------
+  global_rpm: 60                 # 全局每分钟最大请求数（所有用户合计）
+  global_burst: 15               # 全局突发容量（token bucket 最大 token 数）
+
+  # ---------- 用户级限流 ----------
+  user_rpm: 20                   # 单用户每分钟最大请求数
+  user_burst: 5                  # 单用户突发容量
+
+  # ---------- LLM 成本控制 ----------
+  llm_max_tokens_per_hour: 100000      # 单用户每小时最大 LLM token 消耗（输入+输出）
+  llm_max_requests_per_hour: 50        # 单用户每小时最大 LLM 调用次数
+
+  # ---------- Redis 分布式后端 ----------
+  redis_enabled: true            # true=Redis 分布式；false=进程内存模式
 
 # ---------------------------------------------------------------------------
-# Embedding 配置
-# ---------------------------------------------------------------------------
-embedding:
-  provider: dashscope
-  model: text-embedding-v3
-  dimensions: 1024
-  batch_size: 25
-
-# ---------------------------------------------------------------------------
-# Milvus 向量数据库
-# ---------------------------------------------------------------------------
-milvus:
-  host: ${MILVUS_HOST:-localhost}
-  port: ${MILVUS_PORT:-19530}
-  collection: travel_knowledge
-  metric_type: COSINE
-  index_type: IVF_FLAT
-  nlist: 128
-
-# ---------------------------------------------------------------------------
-# Redis 短时记忆
-# ---------------------------------------------------------------------------
-redis:
-  host: ${REDIS_HOST:-localhost}
-  port: ${REDIS_PORT:-6379}
-  db: 0
-  password: ${REDIS_PASSWORD:-}
-  key_prefix: tourai
-
-  # TTL 配置 (秒)
-  ttl:
-    session: 1800        # 会话上下文 (30min)
-    customer: 86400      # 客户画像 (24h)
-    rate_limit: 60       # 频率限制窗口 (1min)
-    agent_state: 300     # Agent 临时状态 (5min)
-    tool_cache: 600      # 工具缓存 (10min)
-    trip_draft: 3600     # 行程草稿 (1h)
-    lock: 30             # 分布式锁 (30s)
-    mid_term: 86400      # 中期摘要 (24h, 过期从MySQL恢复)
-    round: 86400         # 轮次计数器 (24h, 过期从MySQL恢复)
-
-# ---------------------------------------------------------------------------
-# MySQL 长时记忆
-# ---------------------------------------------------------------------------
-mysql:
-  url: ${MYSQL_URL:-mysql://tourai:tourai123@localhost:3306/tourai}
-  charset: utf8mb4
-  pool_size: 5
-  host: localhost
-  port: ${MYSQL_PORT:-3307}
-  user: ${MYSQL_USER:-root}
-  password: ${MYSQL_PASSWORD:-tourai123}
-  database: ${MYSQL_DATABASE:-tourai}
-
-# ---------------------------------------------------------------------------
-# Kafka 工作记忆
+# Kafka 工作记忆 (保留旧版兼容路径)
 # ---------------------------------------------------------------------------
 kafka:
   bootstrap_servers: ${KAFKA_BOOTSTRAP_SERVERS:-localhost:29092}
@@ -109,31 +316,6 @@ kafka:
 postgres:
   url: ${POSTGRES_URL:-postgresql://postgres:postgres@localhost:5432/tourai}
   enabled: ${POSTGRES_ENABLED:-false}
-
-# ---------------------------------------------------------------------------
-# 三层记忆系统
-# ---------------------------------------------------------------------------
-memory:
-  # 短期记忆 — Redis
-  short_term:
-    max_messages: 50           # 每个会话最多保留消息数
-
-  # 中期记忆 — Redis+MySQL 联合
-  mid_term:
-    enabled: true
-    compress_interval: 5       # 每 N 轮触发一次摘要压缩
-    max_summaries: 5           # Redis 中最多保留的摘要段数
-    summary_max_chars: 300     # 摘要最大字符数
-    compress_model: qwen-turbo # 压缩使用的模型
-
-  # 上下文压缩 — 防止超出 LLM 窗口
-  context_compression:
-    enabled: true
-    model_context_window: 8000    # qwen-max 8K 上下文窗口
-    compress_ratio: 0.65          # 窗口 65% 给输入, 35% 给输出
-    max_tokens: 5200              # = 8000 * 0.65
-    recent_window: 10             # 保留最近 N 轮完整消息
-    chars_per_token: 1.5          # 中文 ~1.5 字符/token
 
 # ---------------------------------------------------------------------------
 # 可观测性
@@ -154,19 +336,19 @@ observability:
 # ---------------------------------------------------------------------------
 query_rewrite:
   enabled: true
-  model: qwen-turbo          # 纠错用轻量模型
-  timeout_seconds: 3.0       # LLM 纠错超时 (秒)
+  model: qwen-turbo              # 纠错用轻量模型
+  timeout_seconds: 3.0           # LLM 纠错超时 (秒)
   max_tokens: 200
 
 # ---------------------------------------------------------------------------
 # 天气 API (MCP)
 # ---------------------------------------------------------------------------
 weather:
-  provider: open-meteo        # 免费, 无需 API Key
-  mcp_port: 8765              # MCP Server HTTP 端口
-  forecast_days: 7            # 默认预报天数
-  max_forecast_days: 16       # 免费 API 最大预报天数
-  timeout: 15                 # API 调用超时 (秒)
+  provider: open-meteo           # 免费, 无需 API Key
+  mcp_port: 8765                 # MCP Server HTTP 端口
+  forecast_days: 7               # 默认预报天数
+  max_forecast_days: 16          # 免费 API 最大预报天数
+  timeout: 15                    # API 调用超时 (秒)
 
 # ---------------------------------------------------------------------------
 # Web 服务
