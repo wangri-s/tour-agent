@@ -28,6 +28,7 @@ from langgraph.checkpoint.memory import MemorySaver
 from graph.state import OverallState
 from graph.nodes.input_guard import input_guard
 from graph.nodes.session_context import session_context
+from graph.nodes.query_rewrite import query_rewrite
 from graph.nodes.intent_router import intent_router
 from graph.nodes.customer_service import customer_service
 from graph.nodes.sales_agent import sales_agent_node
@@ -72,6 +73,7 @@ def build_graph(checkpointer=None) -> StateGraph:
 
     builder.add_node("input_guard", input_guard)
     builder.add_node("session_context", session_context)
+    builder.add_node("query_rewrite", query_rewrite)
     builder.add_node("intent_router", intent_router)
     builder.add_node("customer_service", customer_service)
     builder.add_node("sales_agent", sales_agent_node)
@@ -90,7 +92,8 @@ def build_graph(checkpointer=None) -> StateGraph:
     # 入口
     builder.set_entry_point("input_guard")
     builder.add_edge("input_guard", "session_context")
-    builder.add_edge("session_context", "intent_router")
+    builder.add_edge("session_context", "query_rewrite")
+    builder.add_edge("query_rewrite", "intent_router")
 
     # 意图路由器 → 条件分发到四类分支
     builder.add_conditional_edges(
