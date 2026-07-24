@@ -90,14 +90,22 @@ class PromptVersionManager:
     async def load_all(self) -> dict[str, Any]:
         """加载所有配置和版本
 
+        优先从 config/tour_agent.yaml 主配置文件加载，
+        如不存在则降级到独立 YAML + Python 版本文件。
+
         Returns:
             {"agencies": N, "versions": {...}, "status": "ok"}
         """
-        # 1. 加载 prompt 版本
-        self._load_prompt_versions()
+        master_yaml = PROJECT_ROOT / "config" / "tour_agent.yaml"
 
-        # 2. 加载旅行社配置
-        self._load_agency_configs()
+        if master_yaml.exists():
+            # 从主配置文件一次性加载所有内容
+            self._load_from_master_yaml(master_yaml)
+        else:
+            # 降级: 独立文件
+            logger.info("[PromptManager] 主配置文件不存在, 使用独立文件加载")
+            self._load_prompt_versions()
+            self._load_agency_configs()
 
         self._loaded = True
 
@@ -118,11 +126,46 @@ class PromptVersionManager:
         )
         return summary
 
+    def _load_from_master_yaml(self, yaml_path: Path):
+        """从 config/tour_agent.yaml 主配置文件加载所有内容"""
+        with open(yaml_path, "r", encoding="utf-8") as f:
+            master = yaml.safe_load(f)
+
+        if not master:
+            logger.warning("[PromptManager] 主配置文件为空")
+            return
+
+        # 1. 加载 prompt 版本 (YAML 内联文本)
+        prompts_section = master.get("prompts", {})
+        for prompt_name, versions in prompts_section.items():
+            if prompt_name not in self._prompts:
+                self._prompts[prompt_name] = {}
+            for version_key, version_data in versions.items():
+                text = version_data.get("text", "")
+                if text:
+                    self._prompts[prompt_name][version_key] = text.strip()
+                    logger.info(
+                        "[PromptManager] 加载 prompt: %s/%s (%s)",
+                        prompt_name, version_key,
+                        version_data.get("name", version_key),
+                    )
+
+        # 2. 加载旅行社配置
+        agencies_section = master.get("agencies", {})
+        for agency_id, config in agencies_section.items():
+            merged = {**_DEFAULT_AGENCY_CONFIG, **config}
+            self._agencies[agency_id] = merged
+            logger.info(
+                "[PromptManager] 加载旅行社: %s (%s) → trip_planner=%s",
+                agency_id,
+                config.get("brand_name", agency_id),
+                merged.get("prompt_versions", {}).get("trip_planner", "default"),
+            )
+
     def _load_prompt_versions(self):
-        """扫描 prompts/versions/ 目录，动态加载版本模块"""
+        """降级方案: 扫描 prompts/versions/ 目录，动态加载 Python 版本模块"""
         versions_dir = PROJECT_ROOT / "prompts" / "versions"
 
-        # 动态导入版本文件
         version_files = {
             "v2_luxury": "trip_planner_v2",
             "v3_budget": "trip_planner_v3",
@@ -134,7 +177,6 @@ class PromptVersionManager:
                     f"prompts.versions.{module_name}",
                     fromlist=[module_name],
                 )
-                # 按约定: 模块导出 PROMPT 变量
                 if hasattr(mod, "PROMPT"):
                     if "trip_planner" not in self._prompts:
                         self._prompts["trip_planner"] = {}
@@ -144,7 +186,7 @@ class PromptVersionManager:
                 logger.warning("[PromptManager] 版本加载失败 %s: %s", version_key, e)
 
     def _load_agency_configs(self):
-        """加载 config/agencies/*.yaml"""
+        """降级方案: 加载 config/agencies/*.yaml"""
         config_dir = PROJECT_ROOT / "config" / "agencies"
         if not config_dir.exists():
             logger.warning("[PromptManager] 配置目录不存在: %s", config_dir)
@@ -159,7 +201,6 @@ class PromptVersionManager:
                     continue
 
                 agency_id = config["agency_id"]
-                # 合并默认值
                 merged = {**_DEFAULT_AGENCY_CONFIG, **config}
                 self._agencies[agency_id] = merged
                 logger.info(
