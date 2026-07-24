@@ -47,6 +47,7 @@ class KeyPrefix:
 # =============================================================================
 
 class TTL:
+    """TTL 默认值 (可在 config/tour_agent.yaml → redis.ttl 中覆盖)"""
     SESSION     = 1800      # 30 分钟
     CUSTOMER    = 86400     # 24 小时
     RATE_LIMIT  = 60        # 1 分钟窗口
@@ -54,8 +55,18 @@ class TTL:
     TOOL_CACHE  = 600       # 10 分钟
     TRIP_DRAFT  = 3600      # 1 小时
     LOCK        = 30        # 30 秒
-    MID_TERM    = 86400      # 24 小时 (中期摘要, 过期从 MySQL 恢复)
-    ROUND       = 86400      # 24 小时 (轮次计数器, 过期从 MySQL 联表恢复)
+    MID_TERM    = 86400     # 24 小时
+    ROUND       = 86400     # 24 小时
+
+    @classmethod
+    def get(cls, key: str) -> int:
+        """从配置读取 TTL, 配置缺失时用硬编码默认值"""
+        default = getattr(cls, key.upper(), 86400)
+        try:
+            from services.config_loader import config
+            return config.get_int(f"redis.ttl.{key}", default)
+        except Exception:
+            return default
 
 
 class RedisCache:

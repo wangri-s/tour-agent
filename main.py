@@ -89,10 +89,15 @@ async def lifespan(app: FastAPI):
     """应用生命周期：连接记忆系统 → 编译 Graph → 服务 → 关闭"""
     global _graph, _memory, _postgres_checkpoint
 
+    # 加载统一配置
+    from services.config_loader import config as _cfg
+    _cfg.load()
     logger.info("=" * 50)
-    logger.info("Starting tour-agent v0.5.0 — LangSmith + Langfuse + COT + PostgresSaver")
-    logger.info("LLM Model: %s", os.getenv("LLM_MODEL", "qwen-plus"))
+    logger.info("Starting tour-agent v%s — LangSmith + Langfuse + COT + PostgresSaver",
+                _cfg.version)
+    logger.info("LLM Model: %s", _cfg.get_str("llm.models.default", "qwen-plus"))
     logger.info("LangSmith: %s", "✅" if _langsmith_ready else "⚠️ 未配置")
+    logger.info("Config: %s", "✅" if _cfg.is_loaded else "❌")
     logger.info("=" * 50)
 
     # 启动三层记忆系统

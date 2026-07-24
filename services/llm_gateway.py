@@ -17,18 +17,26 @@ class LLMGateway:
     支持切换 OpenAI / 本地模型。
     """
 
-    # 模型配置
-    DEFAULT_MODEL = "qwen-plus"           # 千问主力模型 (性价比最优)
-    PLANNER_MODEL = "qwen-max"            # 千问旗舰模型 (旅游定制复杂推理)
-    ROUTER_MODEL = "qwen-turbo"           # 千问轻量模型 (意图路由)
+    # 模型配置 — 默认值，可被 config/tour_agent.yaml 覆盖
+    DEFAULT_MODEL = "qwen-plus"
+    PLANNER_MODEL = "qwen-max"
+    ROUTER_MODEL = "qwen-turbo"
 
     def __init__(self, model: str | None = None):
-        self.model = model or self.DEFAULT_MODEL
-        self.api_key = os.getenv("DASHSCOPE_API_KEY") or os.getenv("OPENAI_API_KEY") or ""
-        self.base_url = os.getenv(
-            "DASHSCOPE_BASE_URL",
-            os.getenv("OPENAI_BASE_URL", "https://dashscope.aliyuncs.com/compatible-mode/v1"),
-        )
+        # 从统一配置读取 (优先) 或回退到环境变量/默认值
+        try:
+            from services.config_loader import config as _cfg
+            default_model = _cfg.get_str("llm.models.default", self.DEFAULT_MODEL)
+            self.api_key = _cfg.get_str("llm.api_key") or os.getenv("DASHSCOPE_API_KEY", "")
+            self.base_url = _cfg.get_str("llm.base_url") or os.getenv("DASHSCOPE_BASE_URL",
+                "https://dashscope.aliyuncs.com/compatible-mode/v1")
+        except Exception:
+            default_model = self.DEFAULT_MODEL
+            self.api_key = os.getenv("DASHSCOPE_API_KEY") or os.getenv("OPENAI_API_KEY") or ""
+            self.base_url = os.getenv("DASHSCOPE_BASE_URL",
+                os.getenv("OPENAI_BASE_URL", "https://dashscope.aliyuncs.com/compatible-mode/v1"))
+
+        self.model = model or default_model
 
     async def chat(
         self,
