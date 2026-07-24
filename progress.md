@@ -1368,6 +1368,125 @@ hangzhou → 杭州 ✅
 
 ---
 
+## 步骤 32：统一 YAML 配置系统 — 告别散落的 .env 和硬编码
+
+- **时间**：2026-07-24
+- **状态**：✅ 完成
+
+### 背景
+之前配置散落在多处：
+- `.env` 文件：LLM API Key、数据库连接串
+- Python 硬编码：模型名称、TTL 值、端口号
+- 分散的 YAML：`config/agencies/*.yaml`（3个文件）
+- Prompt 文本在 `.py` 文件中，改一个标点都要重启
+
+每次调参都要改代码 → 重启 → 验证，效率极低。
+
+### 新增文件
+
+**`config/tour_agent.yaml`** (~450行) — 唯一配置入口
+
+15 个配置段，覆盖全系统：
+
+| 配置段 | 行数 | 内容 |
+|--------|------|------|
+| `settings` | 3行 | 版本号、debug、项目名 |
+| `llm` | 12行 | 模型名(qwen-plus/max/turbo)、API Key、温度 |
+| `embedding` | 5行 | DashScope text-embedding-v3, 1024维 |
+| `milvus` | 7行 | 向量数据库连接 + 索引参数 |
+| `redis` | 18行 | 连接 + 9项 TTL 可调(session/customer/ratelimit/...) |
+| `mysql` | 8行 | 连接池 + charset |
+| `kafka` | 8行 | bootstrap servers + 6个 topic |
+| `postgres` | 3行 | LangGraph checkpoint 连接 |
+| `memory` | 14行 | 三层记忆：压缩间隔、摘要长度、上下文窗口 |
+| `observability` | 8行 | LangSmith/Langfuse 开关 |
+| `query_rewrite` | 5行 | 纠错超时(3s)、模型(qwen-turbo) |
+| `weather` | 6行 | Open-Meteo 参数(免费、16天预报、15s超时) |
+| `server` | 5行 | 端口、CORS |
+| `prompts` | ~150行 | **3套完整 prompt 文本内联** (v1标准/v2奢华/v3经济) |
+| `agencies` | ~60行 | 3家旅行社配置 + prompt版本关联 + 输出风格 |
+
+**`services/config_loader.py`** (177行) — 统一配置加载器
+
+- **单例模式**：`ConfigLoader` 类，首次访问自动加载
+- **`${ENV_VAR:-default}` 语法**：`_resolve_env()` 递归解析环境变量
+  ```yaml
+  api_key: ${DASHSCOPE_API_KEY}                    # 必须从环境变量读取
+  host: ${REDIS_HOST:-localhost}                   # 有默认值
+  debug: ${TOUR_AGENT_DEBUG:-false}                # bool 类型也支持
+  ```
+- **点号路径访问**：`config.get("llm.models.planner")` → `"qwen-max"`
+- **类型安全**：`get_str()`, `get_int()`, `get_bool()`, `get_float()`, `get_list()`, `get_dict()`
+- **热加载**：`config.reload()` → 无需重启服务
+
+### 修改文件
+
+**`main.py`**:
+- lifespan 启动时调用 `config.load()` 加载配置
+- `ChatRequest` 新增 `agency_id` 字段
+- 每次请求通过 `set_current_agency(req.agency_id)` 设置 ContextVar
+- 新增 3 个管理端点：
+  - `GET /admin/prompts` — 列出所有旅行社和 prompt 版本
+  - `GET /admin/prompts/{agency_id}` — 查看指定旅行社的 prompt
+  - `POST /admin/prompts/reload` — 热加载 prompt（改完 YAML 即生效，无需重启）
+- Weather MCP 挂载到 `/mcp/weather`
+
+**`services/llm_gateway.py`**:
+- `__init__` 优先从 `config_loader` 读取模型名、API Key、Base URL
+- 配置缺失时回退到环境变量 → 硬编码默认值
+
+**`services/redis_cache.py`**:
+- `TTL.get(key)` 类方法：从配置读取 TTL，缺失时用硬编码兜底
+  ```python
+  TTL.get("session")    # → config.get_int("redis.ttl.session") → 1800
+  TTL.get("customer")   # → config.get_int("redis.ttl.customer") → 86400
+  ```
+
+**`services/prompt_manager.py`** (重写):
+- `_load_from_master_yaml()` — 从 `config/tour_agent.yaml` 的 `prompts` 和 `agencies` 段加载
+- `inject_identity(agency_id, prompt_text)` — 品牌身份注入（最高优先级标识）
+- `set_current_agency()` / `get_current_agency()` — ContextVar 传递当前旅行社
+- `_apply_brand_header()` — 在 prompt 前添加品牌头部
+- 旧版散落的 `config/agencies/*.yaml` 文件不再需要
+
+### 架构变化
+
+```
+之前:
+  .env + config/agencies/*.yaml × 3 + Python 硬编码 + prompts/versions/*.py × 3
+  → 改配置要翻 4 类文件，改 prompt 要改 .py 并重启
+
+现在:
+  config/tour_agent.yaml  ← 唯一配置文件
+  → 改配置只改这一个文件
+  → 改 prompt 文本直接编辑 YAML → POST /admin/prompts/reload → 立即生效
+  → 新增旅行社/版本 只改这一个文件
+```
+
+### 降级策略
+所有读取配置的模块都有硬编码兜底：
+```python
+try:
+    api_key = config.get_str("llm.api_key")
+except Exception:
+    api_key = os.getenv("DASHSCOPE_API_KEY", "")  # 兜底
+```
+配置加载失败不会导致服务崩溃。
+
+### 验证
+```
+✅ 配置加载: 15 个顶级配置段全部解析
+✅ ENV_VAR 解析: ${DASHSCOPE_API_KEY} 正确读取
+✅ 默认值语法: ${REDIS_HOST:-localhost} 环境变量未设置时用默认值
+✅ 点号路径: llm.models.planner → qwen-max
+✅ 类型安全: get_bool("llm.params.router_temperature") 等
+✅ 热加载: POST /admin/prompts/reload → 200 OK
+✅ 旅行社查询: GET /admin/prompts → 3家旅行社信息
+✅ 兜底: 配置文件不存在 → 所有模块用硬编码默认值正常运行
+```
+
+---
+
 ## 待办
 
 - [x] `docker compose up -d` 启动基础设施

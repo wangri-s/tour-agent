@@ -236,7 +236,7 @@ class TripPlannerAgent(BaseAgent):
             raw = {k: getattr(state, k) for k in dir(state) if not k.startswith("_")}
             return {**defaults, **raw}
 
-    async def _extract_needs(self, user_msg: str, existing) -> TripNeed:
+    async def _extract_needs(self, user_msg: str, existing: "TripNeed | dict[str, Any]") -> TripNeed:
         """用轻量模型从用户消息中提取结构化需求"""
         from datetime import date as dt_date
         today = dt_date.today().strftime("%Y-%m-%d")
@@ -290,7 +290,7 @@ class TripPlannerAgent(BaseAgent):
         except Exception as e:
             logger.warning(f"[TripPlanner] 需求提取失败: {e}")
 
-        return existing
+        return TripNeed(**existing_data)
 
     def _build_followup(self, need: TripNeed, missing: list[str]) -> str:
         """构建追问信息"""
