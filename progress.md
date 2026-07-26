@@ -1560,6 +1560,108 @@ settings:
 
 ---
 
+## 步骤 34：CustomerServiceAgent 全面升级为 RAG 语义检索
+
+- **时间**：2026-07-26
+- **状态**：✅ 完成
+
+### 背景
+智能客服原先用 `search_faq`（硬编码关键词匹配），覆盖场景有限。用户问"你们有什么产品"时只能回简单信息，无法做产品介绍、退款政策解释等需要丰富上下文的场景。
+
+### 34.1 客服知识库文档
+
+**`knowledge/customer_service_kb.md`** (新建, 13章 ~400行)
+
+| 章节 | 内容 |
+|------|------|
+| 一、平台与产品介绍 | 平台简介 + 三大产品线(标准/奢华/经济) + 8项附加服务 |
+| 二、签证与入境政策 | 免签国家表(2026) + 72/144h过境免签 + 办理流程 + 入境注意事项 |
+| 三、支付与消费 | 5种支付方式对比 + 汇率 + 常见消费价格表 |
+| 四、订单与预订 | 订单状态(6种) + 修改政策 + 查询方式 |
+| 五、取消与退款政策 | 阶梯退款表(6档) + 特殊情况(签证被拒/航班取消/疾病/不可抗力) + 投诉处理 + 补偿标准 |
+| 六、通信与上网 | 5种上网方案 + 防火墙说明 + 必备APP推荐 |
+| 七、交通出行 | 跨城市4种交通方式 + 热门高铁路线 + 市内交通 + 5城市机场指南 |
+| 八、住宿指南 | 4档酒店(经济→奢华) + 5城市推荐 + 预订须知 |
+| 九、安全与应急 | 7个紧急电话 + 安全建议 + 就医指南 |
+| 十、FAQ | 行程/费用/服务三大类常见问题 |
+| 十一、旅行社品牌 | 3家合作旅行社介绍 |
+| 十二、节假日出行 | 2026年节假日表 + 出行建议 |
+| 十三、特殊人群 | 亲子/老年/商务/蜜月出行指南 |
+
+### 34.2 Agent 代码改造
+
+**`agents/customer_service.py`** — 从关键词匹配升级为 RAG
+
+| 变更 | 之前 | 之后 |
+|------|------|------|
+| 检索工具 | `search_faq` (关键词匹配) | `rag_search` (Milvus语义检索) |
+| 消息处理 | 直接调 LLM | 先 RAG 检索 → 注入消息 → 再调 LLM |
+| 上下文 | 无检索上下文 | 拼接最近3轮对话作为检索query |
+| 降级 | 无 | rag_search 内部: Milvus不可用→关键词回退→不影响功能 |
+
+核心流程：
+```
+用户消息 → 拼接最近3轮对话 → rag_search(query, top_k=5)
+  → Milvus语义检索 knowledge/customer_service_kb.md
+  → 检索结果注入为 [知识库检索结果] system消息
+  → LLM基于检索结果+系统提示生成回复
+```
+
+**修复循环导入**：`OverallState` → `TYPE_CHECKING` 延迟导入，避免 `graph.__init__` → `graph.builder` → `graph.nodes.customer_service` → `agents.customer_service` → `graph.state` 的循环链。
+
+### 34.3 Prompt 重写
+
+**`prompts/customer_service.py`** — 180行 → RAG 模式重写
+
+新增 Few-Shot 示例：
+- 示例 0：身份询问（保留）
+- **示例 1（新）**：产品介绍 — 展示如何基于知识库详细介绍三条产品线
+- 示例 2：签证咨询（更新为引用知识库表格）
+- **示例 3（新）**：退款政策 — 先确认出发时间再给出准确比例
+- 示例 4：投诉处理（保留）
+- **示例 5（新）**：出行建议 — 亲子游城市推荐+产品档位建议
+
+新增「产品介绍类」回答规范：必须详细介绍各产品线定位/价格/酒店/交通/适合人群，禁止只说"有多种产品"。
+
+### 34.4 索引脚本类目扩展
+
+**`scripts/index_knowledge_base.py`** — +32 个客服类目映射
+
+```
+产品→service_product  服务→service_product  平台→service_product
+退款→service_policy   取消→service_policy   政策→service_policy
+订单→service_order    预订→service_order
+品牌→service_brand    旅行社→service_brand
+FAQ→service_faq      常见问题→service_faq
+消费→service_payment  价格→service_payment
+通信→service_network  手机→service_network  APP→service_network
+住宿→service_hotel    酒店→service_hotel
+特殊人群→service_guide 亲子→service_guide  老年→service_guide
+商务→service_guide    蜜月→service_guide
+```
+
+### 34.5 Milvus 索引
+
+```
+索引命令: python scripts/index_knowledge_base.py --file knowledge/customer_service_kb.md
+结果: 写入3条，Collection总计13条
+新增类目: service_product(1), service_policy(1), service_order(1),
+           service_brand(1), service_faq(1), service_guide(1),
+           service_hotel(1), service_payment(1)
+```
+
+### 34.6 验证
+
+```
+✅ 产品介绍 → 1100字回复，列出多条产品线+附加服务
+✅ 退款政策 → "出发前20天退90%"，引用旅行社品牌
+✅ 身份识别 → "我是尊享之旅国际旅行社的旅行顾问"
+✅ Milvus索引 → 13个客服类目块已入库
+✅ 循环导入修复 → TYPE_CHECKING延迟导入
+```
+
+---
+
 ## 待办
 
 - [x] `docker compose up -d` 启动基础设施
