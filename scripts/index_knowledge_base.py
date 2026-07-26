@@ -79,9 +79,11 @@ class KnowledgeChunker:
 
     # 分类映射: 标题关键词 → category
     CATEGORY_MAP = {
+        # 签证
         "签证": "visa",
         "入境": "visa",
         "免签": "visa",
+        # 城市
         "北京": "city",
         "上海": "city",
         "西安": "city",
@@ -98,31 +100,66 @@ class KnowledgeChunker:
         "张家界": "city",
         "深圳": "city",
         "城市": "city",
+        # 交通
         "交通": "transport",
         "高铁": "transport",
         "地铁": "transport",
         "高速": "transport",
+        # 天气
         "天气": "weather",
         "季节": "weather",
         "气候": "weather",
+        # 美食
         "美食": "food",
         "小吃": "food",
         "餐饮": "food",
+        # 预算
         "预算": "budget",
         "费用": "budget",
         "花费": "budget",
+        # 文化
         "文化": "culture",
         "礼仪": "culture",
         "习俗": "culture",
+        # 安全
         "安全": "emergency",
         "紧急": "emergency",
         "应急": "emergency",
+        # 支付
         "支付": "payment",
         "上网": "network",
+        # 线路
         "线路": "route",
         "行程": "route",
+        # 节假日
         "节假日": "holiday",
         "黄金周": "holiday",
+        # 客服服务
+        "产品": "service_product",
+        "服务": "service_product",
+        "平台": "service_product",
+        "退款": "service_policy",
+        "取消": "service_policy",
+        "政策": "service_policy",
+        "订单": "service_order",
+        "预订": "service_order",
+        "品牌": "service_brand",
+        "旅行社": "service_brand",
+        "FAQ": "service_faq",
+        "常见问题": "service_faq",
+        "消费": "service_payment",
+        "价格": "service_payment",
+        "通信": "service_network",
+        "手机": "service_network",
+        "APP": "service_network",
+        "住宿": "service_hotel",
+        "酒店": "service_hotel",
+        "就医": "service_emergency",
+        "特殊人群": "service_guide",
+        "亲子": "service_guide",
+        "老年": "service_guide",
+        "商务": "service_guide",
+        "蜜月": "service_guide",
     }
 
     def chunk_file(self, filepath: Path) -> list[dict[str, str]]:
