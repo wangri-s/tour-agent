@@ -26,12 +26,47 @@ TRIP_PARAM_PATTERNS: list[str] = [
 ]
 
 # 非行程关键词 — 即使用户在行程规划会话中，这些词也表明用户想问别的事
-# 如身份询问、投诉、FAQ 等，不应路由到 planner
+# 如身份询问、投诉、FAQ、订单操作等，不应路由到 planner
 NON_TRIP_KEYWORDS: list[str] = [
+    # 身份询问
     "旅行社", "你是", "你是谁", "哪个公司", "什么公司",
-    "投诉", "退款", "取消", "改签", "签证", "入境",
-    "支付", "付款", "支付宝", "微信支付", "汇率",
+    # 投诉/情绪
+    "投诉", "差评", "骗人", "太差",
+    # 订单操作 (即使有行程上下文也应走 operations)
+    "退款", "取消", "改签", "改期", "退票",
+    "升级", "降级", "换房", "换酒店", "加床", "加人",
+    # 签证/入境
+    "签证", "入境",
+    # 支付/汇率
+    "支付", "付款", "支付宝", "微信支付", "汇率", "信用卡",
+    # 天气/安全
     "天气", "安全", "紧急", "报警",
+]
+
+# 订单操作动作词 — 有行程上下文时，这些词表明用户想修改/操作订单
+# 直接路由到 operations，不经过 LLM（确定性高，0ms）
+# 支持短语和单字组合（如"加一张床"→匹配"加"+"床"）
+ORDER_ACTION_KEYWORDS: list[str] = [
+    # 取消/退款
+    "退款", "退票", "退房", "取消订单", "取消行程",
+    # 改期
+    "改签", "改期", "换个日期", "换个时间", "改到",
+    # 升级/降级
+    "升级", "降级",
+    # 换酒店/换房
+    "换房", "换个酒店", "换酒店", "换个房",
+    # 加人/加床
+    "加床", "加人", "加一个人", "多加", "加一张床", "加个床",
+    # 减人
+    "减人", "减少一个人",
+]
+# 分散匹配：单字组合 (如"加一张床"中"加"和"床"分开了)
+ORDER_ACTION_PAIRS: list[tuple[str, str]] = [
+    ("换", "酒店"), ("换", "房"), ("换", "日期"), ("换", "时间"),
+    ("加", "床"), ("加", "人"), ("加", "进去"),
+    ("减", "人"), ("减", "床"),
+    ("退", "票"), ("退", "款"), ("退", "房"),
+    ("改", "日期"), ("改", "时间"), ("改", "到"),
 ]
 
 _router = IntentRouterAgent()
@@ -78,9 +113,20 @@ async def intent_router(state: OverallState) -> PartialState:
             "current_branch": Branch.SERVICE.value,
         })
 
+    # ---- 订单操作关键词: 有行程上下文时直接走 operations (0ms, 不调LLM) ----
+    has_context = _has_trip_context(state)
+    is_order_action = (
+        any(kw in text for kw in ORDER_ACTION_KEYWORDS) or
+        any(a in text and b in text for a, b in ORDER_ACTION_PAIRS)
+    )
+    if is_order_action and has_context:
+        return cast(PartialState, {
+            "current_branch": Branch.OPERATIONS.value,
+            "intent_scores": {"operations": 0.90, "service": 0.05, "sales": 0.02, "planner": 0.03},
+        })
+
     # ---- 行程参数补全: 用户正在回答规划师的追问 ----
     # 条件: (参数模式匹配) OR (有行程上下文 AND 不是明显的非行程问题)
-    has_context = _has_trip_context(state)
     is_param = _is_trip_param(text)
     is_non_trip = any(kw in text for kw in NON_TRIP_KEYWORDS)
 
