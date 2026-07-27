@@ -60,6 +60,13 @@ CHUNK_MIN_LENGTH = 100       # 最小块长度 (字符), 短于此值合并到�
 CHUNK_MAX_LENGTH = 1500      # 最大块长度 (字符), 超出则按段落再切
 EMBEDDING_BATCH = 20         # 每批 embedding 条数
 COLLECTION_NAME = "travel_knowledge"
+
+# 文件 → collection 映射 (不同的知识库索引到不同的 Milvus Collection)
+FILE_COLLECTION_MAP = {
+    "china_travel_kb.md": "travel_knowledge",        # 城市攻略 → trip_planner
+    "customer_service_kb.md": "service_knowledge",    # 客服FAQ → customer_service
+    "tour_packages_kb.md": "package_knowledge",       # 旅游套餐 → sales_agent
+}
 DOC_UID_PREFIX = "kb-2026"
 
 
@@ -312,8 +319,11 @@ async def index_all(incremental: bool = False, rebuild: bool = False):
         except Exception as e:
             logger.warning(f"删除 Collection 失败: {e}")
 
-    # 3. 创建 Collection (如不存在)
-    await milvus_store.create_collection()
+    # 3. 创建所有需要的 Collection
+    collections_needed = set(FILE_COLLECTION_MAP.values())
+    for coll in collections_needed:
+        milvus_store.collection_name = coll
+        await milvus_store.create_collection()
 
     # 4. 扫描知识库文件
     kb_files = sorted(KB_DIR.glob("*.md"))
@@ -323,63 +333,71 @@ async def index_all(incremental: bool = False, rebuild: bool = False):
 
     logger.info(f"发现 {len(kb_files)} 个知识库文件")
 
-    # 5. 切分文档
+    # 5. 切分文档 (按 collection 分组)
     chunker = KnowledgeChunker()
-    all_chunks: list[dict] = []
+    coll_chunks: dict[str, list[dict]] = {}
 
     for filepath in kb_files:
         chunks = chunker.chunk_file(filepath)
-        if incremental:
-            # 增量: 只索引新文档
-            existing = await _get_existing_doc_ids()
-            new_chunks = [c for c in chunks if c["doc_id"] not in existing]
-            logger.info(f"  {filepath.name}: {len(new_chunks)}/{len(chunks)} 个新块")
-            all_chunks.extend(new_chunks)
-        else:
-            all_chunks.extend(chunks)
+        # 确定此文件属于哪个 collection
+        coll_name = FILE_COLLECTION_MAP.get(filepath.name, "travel_knowledge")
+        if coll_name not in coll_chunks:
+            coll_chunks[coll_name] = []
+        coll_chunks[coll_name].extend(chunks)
+        logger.info(f"  {filepath.name}: {len(chunks)} 块 → collection={coll_name}")
 
-    logger.info(f"总计: {len(all_chunks)} 个待索引文档块")
+    total_chunks = sum(len(v) for v in coll_chunks.values())
+    logger.info(f"总计: {total_chunks} 个待索引文档块 ({len(coll_chunks)} 个 collection)")
 
-    if not all_chunks:
-        logger.info("没有新文档需要索引，退出。")
+    if total_chunks == 0:
+        logger.info("没有文档需要索引，退出。")
         return
 
-    # 6. 批量向量化 + 写入
+    # 6. 按 collection 分别批量向量化 + 写入
     total_inserted = 0
-    for i in range(0, len(all_chunks), EMBEDDING_BATCH):
-        batch = all_chunks[i : i + EMBEDDING_BATCH]
+    for coll_name, chunks in coll_chunks.items():
+        milvus_store.collection_name = coll_name
+        await milvus_store.connect()
+        logger.info(f"索引 collection={coll_name}: {len(chunks)} 块")
 
-        # 向量化
-        texts = [c["content"][:2000] for c in batch]  # 截断过长内容
-        embeddings = await embedding_service.embed(texts)
+        for i in range(0, len(chunks), EMBEDDING_BATCH):
+            batch = chunks[i : i + EMBEDDING_BATCH]
 
-        if not embeddings or len(embeddings) != len(batch):
-            logger.error(f"  批次 {i//EMBEDDING_BATCH + 1} embedding 失败，跳过")
-            continue
+            # 向量化
+            texts = [c["content"][:2000] for c in batch]  # 截断过长内容
+            embeddings = await embedding_service.embed(texts)
 
-        # 写入 Milvus
-        inserted = await milvus_store.insert_batch(batch, embeddings)
-        total_inserted += inserted
+            if not embeddings or len(embeddings) != len(batch):
+                logger.error(f"  批次 {i//EMBEDDING_BATCH + 1} embedding 失败，跳过")
+                continue
 
-        logger.info(
-            f"  批次 {i//EMBEDDING_BATCH + 1}: "
-            f"向量化 {len(embeddings)} 条, 写入 {inserted} 条 "
-            f"({(i+len(batch))/len(all_chunks)*100:.0f}%)"
-        )
+            # 写入 Milvus
+            inserted = await milvus_store.insert_batch(batch, embeddings)
+            total_inserted += inserted
 
-    # 7. 统计
-    final_count = await milvus_store.count()
+            logger.info(
+                f"  批次 {i//EMBEDDING_BATCH + 1}/{len(chunks)//EMBEDDING_BATCH + 1}: "
+                f"向量化 {len(embeddings)} 条, 写入 {inserted} 条 "
+                f"({min(i+len(batch), len(chunks))/len(chunks)*100:.0f}%)"
+            )
+
+        # 统计单 collection
+        coll_count = await milvus_store.count()
+        logger.info(f"  collection={coll_name} 总计: {coll_count} 条")
+
+    # 7. 总体统计
     logger.info("=" * 60)
-    logger.info(f"索引完成! 本次写入: {total_inserted} 条, Collection 总计: {final_count} 条")
+    logger.info(f"索引完成! 本次写入: {total_inserted} 条")
     logger.info("=" * 60)
 
-    # 8. 打印分类统计
-    cats = {}
-    for c in all_chunks:
-        cats[c["category"]] = cats.get(c["category"], 0) + 1
-    logger.info("分类统计:")
-    for cat, count in sorted(cats.items()):
-        logger.info(f"  {cat}: {count} 块")
+    # 8. 打印各 collection 分类统计
+    for coll_name, chunks in coll_chunks.items():
+        cats = {}
+        for c in chunks:
+            cats[c["category"]] = cats.get(c["category"], 0) + 1
+        logger.info(f"Collection [{coll_name}] 分类统计:")
+        for cat, count in sorted(cats.items()):
+            logger.info(f"  {cat}: {count} 块")
 
 
 async def _get_existing_doc_ids() -> set[str]:

@@ -1,4 +1,4 @@
-"""销售 Agent —— 产品推介、报价、签约引导、意向评分"""
+"""销售 Agent —— 产品推介、报价、签约引导、意向评分、套餐推荐"""
 
 from __future__ import annotations
 
@@ -9,17 +9,18 @@ from prompts.sales_agent import SALES_AGENT_PROMPT
 from graph.state import OverallState, IntentLevel
 from tools.quote_price import quote_price
 from tools.query_inventory import query_inventory
+from tools.package_search import search_tour_packages
 
 
 class SalesAgent(BaseAgent):
     """主动引导客户完成产品销售
 
-    确认预算与决策人，高意向推送签约链接，中低意向推送案例与优惠。
+    确认预算与决策人，高意向推送签约链接，中低意向推送套餐推荐与优惠。
     """
 
     def __init__(self):
         super().__init__(name="sales_agent")
-        self.tools = [quote_price, query_inventory]
+        self.tools = [quote_price, query_inventory, search_tour_packages]
 
     def system_prompt(self) -> str:
         return SALES_AGENT_PROMPT

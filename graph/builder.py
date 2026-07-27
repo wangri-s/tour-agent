@@ -39,6 +39,7 @@ from graph.nodes.revision_loop import revision_loop
 from graph.nodes.quote_agent import quote_agent_node
 from graph.nodes.human_handoff import human_handoff
 from graph.nodes.operations_sync import operations_sync
+from graph.nodes.package_recommend import package_recommend
 from graph.routing import (
     route_after_intent,
     route_after_service,
@@ -84,6 +85,7 @@ def build_graph(checkpointer=None) -> StateGraph:
     builder.add_node("quote_agent", quote_agent_node)
     builder.add_node("human_handoff", human_handoff)
     builder.add_node("operations_sync", operations_sync)
+    builder.add_node("package_recommend", package_recommend)
 
     # =========================================================================
     # 添加边
@@ -160,8 +162,9 @@ def build_graph(checkpointer=None) -> StateGraph:
     # 修订循环 → trip_planner 重新生成
     builder.add_edge("revision_loop", "trip_planner")
 
-    # 报价 → operations_sync → END
-    builder.add_edge("quote_agent", "operations_sync")
+    # 报价 → 套餐推荐 → operations_sync → END
+    builder.add_edge("quote_agent", "package_recommend")
+    builder.add_edge("package_recommend", "operations_sync")
 
     # 人工接管 → 兜底 → END
     builder.add_edge("human_handoff", "operations_sync")

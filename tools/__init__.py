@@ -9,6 +9,7 @@ from tools.query_inventory import query_inventory
 from tools.quote_price import quote_price
 from tools.update_crm import update_crm
 from tools.send_capi import send_capi
+from tools.package_search import search_tour_packages
 
 __all__ = [
     "search_faq",
@@ -23,4 +24,5 @@ __all__ = [
     "quote_price",
     "update_crm",
     "send_capi",
+    "search_tour_packages", # 套餐检索 (RAG + MySQL)
 ]
