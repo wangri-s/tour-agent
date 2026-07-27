@@ -74,9 +74,8 @@ async def fetch_weather(
     today = date.today()
     max_date = today + timedelta(days=MAX_FORECAST_DAYS)
 
-    # 日期校验: 超出预报范围的日期自动忽略，改查默认 7 天
-    effective_start = start_date
-    effective_end = end_date
+    # 日期校验: 超出预报范围则降级为默认 7 天
+    effective_days = forecast_days
     if start_date:
         try:
             sd = date.fromisoformat(start_date)
@@ -85,11 +84,9 @@ async def fetch_weather(
                     "[Open-Meteo] start_date=%s 超出 %d 天预报范围, 使用默认预报",
                     start_date, MAX_FORECAST_DAYS,
                 )
-                effective_start = ""
-                effective_end = ""
+                effective_days = 7
         except ValueError:
-            effective_start = ""
-            effective_end = ""
+            effective_days = 7
 
     params: dict[str, Any] = {
         "latitude": lat,
@@ -97,13 +94,8 @@ async def fetch_weather(
         "daily": "temperature_2m_max,temperature_2m_min,precipitation_sum,weather_code,wind_speed_10m_max",
         "current": "temperature_2m,relative_humidity_2m,weather_code,wind_speed_10m",
         "timezone": "Asia/Shanghai",
-        "forecast_days": min(forecast_days, MAX_FORECAST_DAYS),
+        "forecast_days": min(effective_days, MAX_FORECAST_DAYS),
     }
-
-    if effective_start:
-        params["start_date"] = effective_start
-    if effective_end:
-        params["end_date"] = effective_end
 
     client = await _get_client()
     try:
