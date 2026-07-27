@@ -292,8 +292,26 @@ class TripPlannerAgent(BaseAgent):
 
         return TripNeed(**existing_data)
 
+    # 城市 → 代表美食 (用于追问时展示选项)
+    _CITY_FOODS: dict[str, list[str]] = {
+        "北京": ["北京烤鸭", "涮羊肉", "炸酱面", "豆汁焦圈", "宫廷点心"],
+        "上海": ["小笼包", "生煎包", "蟹粉豆腐", "红烧肉", "葱油拌面"],
+        "西安": ["肉夹馍", "羊肉泡馍", "凉皮", "biangbiang面", "葫芦鸡"],
+        "成都": ["火锅", "串串香", "担担面", "麻婆豆腐", "龙抄手"],
+        "重庆": ["火锅", "小面", "酸辣粉", "毛血旺", "辣子鸡"],
+        "广州": ["早茶(虾饺/肠粉)", "煲仔饭", "白切鸡", "烧鹅", "双皮奶"],
+        "杭州": ["西湖醋鱼", "东坡肉", "龙井虾仁", "叫花鸡", "片儿川"],
+        "苏州": ["松鼠桂鱼", "阳澄湖大闸蟹", "糖粥", "生煎", "桂花糕"],
+        "桂林": ["桂林米粉", "啤酒鱼", "荔浦芋扣肉", "田螺酿", "马蹄糕"],
+        "云南": ["过桥米线", "汽锅鸡", "野生菌火锅", "腊排骨", "烤乳扇"],
+        "厦门": ["沙茶面", "海蛎煎", "姜母鸭", "土笋冻", "花生汤"],
+        "哈尔滨": ["锅包肉", "哈尔滨红肠", "铁锅炖", "马迭尔冰棍", "大列巴"],
+        "拉萨": ["藏面", "甜茶", "牦牛肉", "酥油茶", "糌粑"],
+        "张家界": ["三下锅", "土家腊肉", "血豆腐", "酸鱼肉", "葛根粉"],
+    }
+
     def _build_followup(self, need: TripNeed, missing: list[str]) -> str:
-        """构建追问信息"""
+        """构建追问信息 — 含美食偏好 + 选项展示 + 未考虑项"""
         known_info = []
         if need.destination:
             known_info.append(f"目的地：{need.destination}")
@@ -309,7 +327,41 @@ class TripPlannerAgent(BaseAgent):
         parts = []
         if known_info:
             parts.append(f"好的！已了解到：{'，'.join(known_info)}。")
-        parts.append(f"还需要确认以下信息：{'、'.join(missing)}。")
+
+        # 必填项追问
+        if missing:
+            parts.append(f"还需要确认以下信息：{'、'.join(missing)}。")
+
+        # ---- 美食偏好追问 (有目的地时主动问) ----
+        dest = need.destination
+        foods = self._CITY_FOODS.get(dest, [])
+        if foods and not need.theme:
+            food_list = "、".join(foods[:5])
+            parts.append(f"")
+            parts.append(f"🍜 **{dest}美食偏好**：")
+            parts.append(f"当地特色有 {food_list}，您对美食有什么偏好吗？")
+            parts.append(f"（比如：无辣不欢 / 清淡养生 / 必须吃火锅 / 想尝遍小吃）")
+
+        # ---- 未考虑的选项 ----
+        unconsidered = []
+        if not need.theme:
+            unconsidered.append("旅行主题（历史文化 / 自然风光 / 美食之旅 / 综合体验）")
+        if not need.pace:
+            unconsidered.append("行程节奏（轻松每天2景 / 适中3景 / 紧凑4-5景）")
+        if need.pax == 0 or need.pax is None:
+            pass  # 已在missing中
+        elif need.pax >= 2 and not need.theme:
+            pass  # 用美食偏好覆盖
+        if not need.dietary and need.pax > 0:
+            unconsidered.append("饮食禁忌（清真 / 素食 / 过敏食材）")
+
+        if unconsidered:
+            parts.append(f"")
+            parts.append(f"💡 **其他可选偏好**（可跳过）：")
+            for item in unconsidered:
+                parts.append(f"  · {item}")
+
+        parts.append(f"")
         parts.append("请告诉我这些细节，我就能为您定制行程啦！✈️")
 
         return "\n".join(parts)
