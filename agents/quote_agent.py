@@ -55,8 +55,52 @@ class QuoteAgent(BaseAgent):
         # 入境游：国际机票 30%，酒店 35%
         flight_ratio = 0.30 if is_international else 0.15
         hotel_ratio = 0.35 if is_international else 0.50
+
+        # 入境游：尝试获取实时/参考机票价格
+        real_flight_price = None
+        flight_price_source = ""
+        if is_international:
+            try:
+                dest = need_data.get("destination", "") if isinstance(need_data, dict) else getattr(need, "destination", "")
+                arrival = need_data.get("arrival_date", "") if isinstance(need_data, dict) else getattr(need, "arrival_date", "")
+
+                # 1. 先查 Amadeus 实时 API (从主流出发城市)
+                from mcp_servers.flight import get_flight_price, FALLBACK_FLIGHTS, get_airport_code
+
+                dest_code = get_airport_code(dest) or ""
+                # 尝试最可能的出发城市: 纽约→北京, 伦敦→北京, 东京→上海 等
+                test_origins = ["纽约", "伦敦", "东京", "新加坡"]
+                for origin_city in test_origins:
+                    if get_airport_code(origin_city):
+                        result = await get_flight_price(
+                            origin=origin_city, destination=dest,
+                            departure_date=arrival, adults=1,
+                        )
+                        if "flights" in result and result["flights"]:
+                            real_flight_price = result["flights"][0]["price"]
+                            flight_price_source = f"Amadeus实时 ({origin_city}→{dest})"
+                            break
+                        if "fallback" in result and "reference_price" in result["fallback"]:
+                            if not real_flight_price:
+                                real_flight_price = result["fallback"]["reference_price"]
+                                flight_price_source = f"参考均价 ({origin_city}→{dest})"
+                            break
+
+                # 2. 没找到具体航线 → 取所有航线的中位数
+                if not real_flight_price and dest_code:
+                    prices = [v["price"] for k, v in FALLBACK_FLIGHTS.items() if dest_code in k]
+                    if prices:
+                        real_flight_price = sum(prices) / len(prices)
+                        flight_price_source = f"航线均价 (飞{dest})"
+
+                if real_flight_price:
+                    logger.info(f"[QuoteAgent] 机票价: ¥{real_flight_price:.0f} ({flight_price_source})")
+
+            except Exception as e:
+                logger.debug(f"[QuoteAgent] 机票查询跳过: {e}")
+
         hotel_per_night = total * hotel_ratio / max(days, 1)
-        flights = total * flight_ratio
+        flights = real_flight_price if real_flight_price else (total * flight_ratio)
         transport = total * 0.10
         tickets = total * 0.10
         meals = total * 0.10
@@ -75,12 +119,15 @@ class QuoteAgent(BaseAgent):
         )
 
         transport_label = "✈️ 国际机票" if is_international else "🚄 高铁/动车"
+        flight_note = ""
+        if is_international and flight_price_source:
+            flight_note = f" ({flight_price_source})"
 
         reply = (
             f"📊 **报价单**\n\n"
             f"| 项目 | 人均费用 |\n"
             f"|------|----------|\n"
-            f"| {transport_label} | ¥{quote.flights:,} |\n"
+            f"| {transport_label} | ¥{quote.flights:,}{flight_note} |\n"
             f"| 🏨 酒店({days}晚) | ¥{quote.hotels:,} |\n"
             f"| 🚗 市内交通 | ¥{quote.transport:,} |\n"
             f"| 🎫 景点门票 | ¥{quote.tickets:,} |\n"

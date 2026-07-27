@@ -10,6 +10,7 @@ from tools.quote_price import quote_price
 from tools.update_crm import update_crm
 from tools.send_capi import send_capi
 from tools.package_search import search_tour_packages
+from tools.flight_search import search_flight_price
 
 __all__ = [
     "search_faq",
@@ -25,4 +26,5 @@ __all__ = [
     "update_crm",
     "send_capi",
     "search_tour_packages", # 套餐检索 (RAG + MySQL)
+    "search_flight_price",  # 机票实时查询 (Amadeus + 参考价)
 ]
