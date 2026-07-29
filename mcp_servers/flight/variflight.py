@@ -148,7 +148,16 @@ def _resolve_city_code(city: str) -> str:
 
 
 def _parse_flight_results(raw: dict | str) -> list[dict]:
-    """解析飞常准返回的航班数据"""
+    """解析飞常准返回的航班数据
+
+    飞常准 MCP 返回格式为文本描述:
+      "为您查询到191条符合要求的航线，最低价:350元...
+       最低价航线为：航班号：MU5231，起飞时间：...，到达时间：...，飞行时间1h55m...
+       最短耗时航线为：航班号：CA8341...
+       我们还为您推荐以下方案：1. 航班号：CZ8882..."
+    """
+    import re
+
     data = raw
     if isinstance(data, str):
         try:
@@ -156,44 +165,99 @@ def _parse_flight_results(raw: dict | str) -> list[dict]:
         except json.JSONDecodeError:
             return []
 
+    # 飞常准返回 {code: 200, message: "Success", data: "text..."}
+    text = ""
+    if isinstance(data, dict):
+        text = data.get("data", "") or data.get("message", "") or ""
+        if isinstance(text, str) and len(text) > 50:
+            pass  # 用文本解析
+        else:
+            # 尝试其他格式
+            return _parse_structured(data)
+
+    if not text or not isinstance(text, str):
+        return []
+
     flights = []
 
-    # 尝试多种可能的响应格式
+    # 逐条提取: 航班号：MU5231...价格350元
+    # 飞常准文本格式: "N. 航班号：XX0000，...价格XXX元"
+    flight_pattern = re.compile(
+        r'(?:航班号|航班)[：:]\s*([A-Z]{2}\d+)'
+    )
+    time_pattern = re.compile(
+        r'(?:起飞时间|出发)[：:]\s*(\d{4}-\d{2}-\d{2}\s*\d{2}:\d{2}:\d{2})'
+    )
+    arr_pattern = re.compile(
+        r'(?:到达时间|到达)[：:]\s*(\d{4}-\d{2}-\d{2}\s*\d{2}:\d{2}:\d{2})'
+    )
+    dur_pattern = re.compile(r'(?:耗时|飞行时间)[：:]\s*(\d+h\d+m|\d+h)')
+    price_pattern = re.compile(r'(?:经济舱|超值经济舱|商务舱|头等舱)?价格[：:]\s*(\d+)\s*元')
+
+    # 按序号或"航班号"分割文本
+    segments = re.split(r'(?:\d+\.\s*)?(?=航班号[：:])', text)
+
+    for seg in segments:
+        fn = flight_pattern.search(seg)
+        dep = time_pattern.search(seg)
+        arr = arr_pattern.search(seg)
+        dur = dur_pattern.search(seg)
+        pr = price_pattern.search(seg)
+
+        if fn and dep and arr and pr:
+            flights.append({
+                "flight_no": fn.group(1),
+                "airline": fn.group(1)[:2],
+                "departure": dep.group(1).replace(' ', 'T'),
+                "arrival": arr.group(1).replace(' ', 'T'),
+                "duration": dur.group(1) if dur else "",
+                "price": int(pr.group(1)),
+                "currency": "CNY",
+                "stops": 0,
+                "source": "VariFlight",
+            })
+
+    # 去重 (同航班号只保留最低价)
+    seen = {}
+    for f in flights:
+        key = f["flight_no"]
+        if key not in seen or f["price"] < seen[key]["price"]:
+            seen[key] = f
+    flights = sorted(seen.values(), key=lambda x: x["price"])
+
+    if flights:
+        return flights
+
+    # 正则匹配失败 → 尝试结构化解析
+    return _parse_structured(data)
+
+
+def _parse_structured(data: dict) -> list[dict]:
+    """结构化格式解析 (备用)"""
+    flights = []
     items = (
-        data.get("data", []) or
+        data.get("data", []) if isinstance(data.get("data"), list) else
         data.get("flights", []) or
         data.get("itineraries", []) or
         data.get("results", []) or
         []
     )
 
-    # 如果是单个结果对象
-    if isinstance(data, dict) and not items:
-        # 可能直接返回了最低/推荐航班
-        for key in ["lowestPriceFlight", "shortestDurationFlight", "recommendedFlight"]:
-            if key in data and data[key]:
-                items.append(data[key])
-
     for item in items:
-        flight = {
-            "price": (
-                item.get("price") or
-                item.get("totalPrice") or
-                item.get("fare") or
-                item.get("lowestPrice") or 0
-            ),
-            "currency": item.get("currency", "CNY"),
-            "airline": item.get("airline", item.get("carrier", "")),
-            "flight_no": item.get("flightNo", item.get("flightNumber", "")),
-            "departure": item.get("depTime", item.get("departureTime", "")),
-            "arrival": item.get("arrTime", item.get("arrivalTime", "")),
-            "duration": item.get("duration", ""),
-            "stops": item.get("stops", item.get("transferCount", 0)),
-            "aircraft": item.get("aircraft", item.get("planeType", "")),
-            "cabin": item.get("cabin", item.get("cabinClass", "")),
-        }
-        if flight["price"] > 0:
-            flights.append(flight)
+        if isinstance(item, dict):
+            flight = {
+                "price": item.get("price") or item.get("totalPrice") or item.get("fare") or 0,
+                "currency": item.get("currency", "CNY"),
+                "airline": item.get("airline", item.get("carrier", "")),
+                "flight_no": item.get("flightNo", item.get("flightNumber", "")),
+                "departure": item.get("depTime", item.get("departureTime", "")),
+                "arrival": item.get("arrTime", item.get("arrivalTime", "")),
+                "duration": str(item.get("duration", "")),
+                "stops": item.get("stops", item.get("transferCount", 0)),
+                "source": "VariFlight",
+            }
+            if flight["price"] > 0:
+                flights.append(flight)
 
     flights.sort(key=lambda x: x["price"])
     return flights
