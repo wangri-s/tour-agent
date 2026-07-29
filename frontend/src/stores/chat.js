@@ -4,7 +4,7 @@
 
 import { defineStore } from 'pinia'
 import { ref, computed, watch } from 'vue'
-import { sendMessage, sendMessageStream, checkHealth } from '../api/index.js'
+import { sendMessage, sendMessageStream, checkHealth, fetchHistory } from '../api/index.js'
 
 // localStorage 键名
 const LS_SESSION_ID = 'tourai_session_id'
@@ -83,7 +83,7 @@ export const useChatStore = defineStore('chat', () => {
   const sessions = ref(loadSessions())
   const sidebarOpen = ref(true)
 
-  // ---- 启动时恢复当前会话的消息 ----
+  // ---- 启动时恢复当前会话的消息 (localStorage → MySQL 降级) ----
   {
     const saved = loadSessionData(sessionId.value)
     if (saved) {
@@ -97,6 +97,17 @@ export const useChatStore = defineStore('chat', () => {
       if (saved.draft) currentDraft.value = saved.draft
       if (saved.quote) currentQuote.value = saved.quote
       if (saved.branch) currentBranch.value = saved.branch
+    } else {
+      // localStorage 无数据 → 从 MySQL 恢复
+      fetchHistory(sessionId.value).then(data => {
+        if (data.messages && data.messages.length > 0) {
+          messages.value = data.messages.map(m => ({
+            role: m.role,
+            content: m.content,
+            time: new Date(),
+          }))
+        }
+      }).catch(() => {})
     }
   }
 
@@ -148,7 +159,7 @@ export const useChatStore = defineStore('chat', () => {
     sessionId.value = id
     clearChat()
 
-    // 3. 从 localStorage 恢复目标会话的完整数据
+    // 3. 从 localStorage 恢复目标会话的完整数据 (localStorage → MySQL 降级)
     const data = loadSessionData(id)
     if (data) {
       if (data.messages && Array.isArray(data.messages)) {
@@ -161,6 +172,17 @@ export const useChatStore = defineStore('chat', () => {
       if (data.draft) currentDraft.value = data.draft
       if (data.quote) currentQuote.value = data.quote
       if (data.branch) currentBranch.value = data.branch
+    } else {
+      // localStorage 无数据 → 从 MySQL 恢复
+      fetchHistory(id).then(res => {
+        if (res.messages && res.messages.length > 0) {
+          messages.value = res.messages.map(m => ({
+            role: m.role,
+            content: m.content,
+            time: new Date(),
+          }))
+        }
+      }).catch(() => {})
     }
   }
 

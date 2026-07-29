@@ -17,6 +17,13 @@ export async function fetchAgencies() {
   return res.json()
 }
 
+/** 从 MySQL 恢复会话历史 (服务重启后不丢失) */
+export async function fetchHistory(sessionId) {
+  const res = await fetch(`${BASE}/history/${sessionId}`)
+  if (!res.ok) throw new Error(`Failed to fetch history: ${res.status}`)
+  return res.json()
+}
+
 export async function sendMessage({ session_id, customer_id, agency_id, channel, message, language }) {
   const res = await fetch(`${BASE}/chat`, {
     method: 'POST',

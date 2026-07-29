@@ -195,6 +195,25 @@ async def admin_list_prompts():
     }
 
 
+@app.get("/history/{session_id}")
+async def get_session_history(session_id: str):
+    """从 MySQL 恢复会话对话历史（服务重启后不丢失）"""
+    try:
+        from services.mysql_store import mysql_store
+        if not mysql_store._pool:
+            await mysql_store.connect()
+        if mysql_store._pool:
+            messages = await mysql_store.get_conversation(session_id, limit=100)
+            return {
+                "session_id": session_id,
+                "count": len(messages),
+                "messages": [{"role": m.get("role","user"), "content": m.get("content","")} for m in reversed(messages)],
+            }
+        return {"session_id": session_id, "count": 0, "messages": []}
+    except Exception as e:
+        return {"session_id": session_id, "count": 0, "error": str(e)[:200]}
+
+
 @app.get("/admin/prompts/{agency_id}")
 async def admin_get_agency_prompt(agency_id: str):
     """查看某个旅行社的完整 prompt 文本"""
