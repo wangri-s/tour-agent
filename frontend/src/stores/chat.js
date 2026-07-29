@@ -4,7 +4,7 @@
 
 import { defineStore } from 'pinia'
 import { ref, computed, watch } from 'vue'
-import { sendMessage, sendMessageStream, checkHealth, fetchHistory } from '../api/index.js'
+import { sendMessage, sendMessageStream, checkHealth, fetchHistory, fetchSessions } from '../api/index.js'
 
 // localStorage 键名
 const LS_SESSION_ID = 'tourai_session_id'
@@ -82,6 +82,23 @@ export const useChatStore = defineStore('chat', () => {
   // ---- 多会话历史 ----
   const sessions = ref(loadSessions())
   const sidebarOpen = ref(true)
+
+  // 启动时: localStorage 无会话列表 → 从 MySQL 恢复
+  if (sessions.value.length === 0) {
+    fetchSessions().then(data => {
+      if (data.sessions && data.sessions.length > 0) {
+        sessions.value = data.sessions.map(s => ({
+          id: s.id,
+          title: s.id.slice(-12),
+          date: s.lastAt ? s.lastAt.slice(0,16) : '',
+          msgCount: s.msgCount || 0,
+          draft: 0,
+          branch: '',
+        }))
+        saveSessions(sessions.value)
+      }
+    }).catch(() => {})
+  }
 
   // ---- 启动时恢复当前会话的消息 (localStorage → MySQL 降级) ----
   {

@@ -195,6 +195,39 @@ async def admin_list_prompts():
     }
 
 
+@app.get("/sessions")
+async def list_sessions():
+    """从 MySQL 列出所有会话（sidebar 历史列表，服务重启不丢）"""
+    try:
+        from services.mysql_store import mysql_store
+        if not mysql_store._pool:
+            await mysql_store.connect()
+        if mysql_store._pool:
+            rows = await mysql_store._fetch(
+                """SELECT session_id, channel, language,
+                          COUNT(*) as msg_count,
+                          MIN(created_at) as first_at, MAX(created_at) as last_at
+                   FROM conversations
+                   GROUP BY session_id, channel, language
+                   ORDER BY MAX(created_at) DESC LIMIT 50""",
+                (),
+            )
+            sessions = []
+            for r in rows:
+                sessions.append({
+                    "id": r.get("session_id",""),
+                    "channel": r.get("channel","web"),
+                    "language": r.get("language","zh"),
+                    "msgCount": r.get("msg_count",0),
+                    "firstAt": str(r.get("first_at","")),
+                    "lastAt": str(r.get("last_at","")),
+                })
+            return {"sessions": sessions, "count": len(sessions)}
+        return {"sessions": [], "count": 0}
+    except Exception as e:
+        return {"sessions": [], "count": 0, "error": str(e)[:200]}
+
+
 @app.get("/history/{session_id}")
 async def get_session_history(session_id: str):
     """从 MySQL 恢复会话对话历史（服务重启后不丢失）"""

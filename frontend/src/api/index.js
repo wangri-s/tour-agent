@@ -17,7 +17,14 @@ export async function fetchAgencies() {
   return res.json()
 }
 
-/** 从 MySQL 恢复会话历史 (服务重启后不丢失) */
+/** 从 MySQL 恢复会话列表 (服务重启后不丢失) */
+export async function fetchSessions() {
+  const res = await fetch(`${BASE}/sessions`)
+  if (!res.ok) throw new Error(`Failed to fetch sessions: ${res.status}`)
+  return res.json()
+}
+
+/** 从 MySQL 恢复会话历史消息 (服务重启后不丢失) */
 export async function fetchHistory(sessionId) {
   const res = await fetch(`${BASE}/history/${sessionId}`)
   if (!res.ok) throw new Error(`Failed to fetch history: ${res.status}`)
