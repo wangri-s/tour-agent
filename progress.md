@@ -1662,6 +1662,84 @@ FAQ→service_faq      常见问题→service_faq
 
 ---
 
+---
+
+## 步骤 35：销售签单引导 + 飞常准机票API + 历史对话MySQL恢复
+
+- **时间**：2026-07-27 ~ 2026-07-29
+- **状态**：✅ 完成
+
+### 35.1 销售 Agent 签单全流程
+
+**prompts/sales_agent.py** 全面重写 (~350行)：
+
+- 销售漏斗五阶段: 意向确认→方案推荐→打消顾虑→促成签单→支付引导
+- 4个完整Few-Shot: 全流程签单/嫌贵异议/犹豫不决/修改行程
+- 异议处理话术库: 太贵/别家更便宜/考虑考虑/时间不确定/不信任/签证
+- 付款细节: 30%定金→合同(30分钟)→尾款出发前7天
+- 降低门槛: ¥500意向金锁价30天+可退
+
+**agents/sales_agent.py**：
+- 上下文感知: 从state提取need/draft/quote注入LLM
+- 15条消息窗口(原10条)
+- 意向评分增强: 25+关键词(原6个)
+
+### 35.2 飞常准 VariFlight MCP 机票实时查询
+
+**mcp_servers/flight/variflight.py** (新建)：
+- Python MCP Client 连接 Node.js MCP Server
+- npx @variflight-ai/variflight-mcp (stdlib通信)
+- 34个中国城市IATA三字码
+- 文本解析适配飞常准返回格式(正则提取航班号/时间/价格)
+
+**mcp_servers/flight/__init__.py** — 三级降级策略：
+1. 飞常准 MCP (国内航线, 实时价, 100次免费)
+2. Amadeus API (国际航线)
+3. 12条航线参考均价 (离线兜底)
+
+实测数据：
+| 航线 | 日期 | 最低价 | 航班 |
+|------|------|--------|------|
+| 北京→上海 | 8/15 | ¥350 | MU5231 |
+| 成都→北京 | 10/15 | ¥580 | JD5560 |
+
+配置: 注册 https://mcp.variflight.com → `VARIFLIGHT_API_KEY=xxx`
+
+### 35.3 历史对话 MySQL 持久化恢复
+
+**后端**：
+- `GET /sessions`: 从MySQL GROUP BY查询50条会话列表
+- `GET /history/{session_id}`: 从MySQL恢复会话对话历史
+- 服务重启后sidebar+消息全部不丢失
+
+**前端**：
+- chat.js: switchSession/启动时 localStorage → MySQL 两级降级
+- api/index.js: +fetchSessions() +fetchHistory()
+- vite.config.js: +/sessions +/history proxy
+
+**恢复链路**：
+```
+localStorage 有数据 → 直接显示
+localStorage 无数据 → API加载 → MySQL → 恢复50条会话
+```
+
+### 35.4 quote_agent 机票实时价集成
+
+**agents/quote_agent.py**：
+- 入境游报价自动查实时机票
+- 依次尝试: VariFlight国内→Amadeus国际→参考均价
+- 报价单标注票价来源
+
+### 35.5 意图路由边界修复
+
+**graph/nodes/intent_router.py**：
+- NON_TRIP_KEYWORDS +14个(差评/骗人/退票/升级/换房/加床等)
+- ORDER_ACTION_KEYWORDS +20个短语
+- ORDER_ACTION_PAIRS +15组分散匹配(如"加...床"→operations)
+- 边界case修复: "加一张床""改到下周一""换房间可以吗" → 正确路由operations
+
+---
+
 ## 待办
 
 - [x] `docker compose up -d` 启动基础设施
