@@ -242,7 +242,9 @@ async def get_flight_price(
     return_date: str = "",
     adults: int = 1,
 ) -> dict[str, Any]:
-    """获取机票价格 — API优先 + 降级参考价
+    """获取机票价格 — 三级降级策略
+
+    优先级: VariFlight(国内实时) → Amadeus(国际实时) → 参考均价
 
     用于 trip_planner/quote_agent 查询大交通费用。
     """
@@ -250,6 +252,32 @@ async def get_flight_price(
     if not departure_date:
         departure_date = (datetime.now() + timedelta(days=30)).strftime("%Y-%m-%d")
 
+    # 判断是国内还是国际航线
+    origin_iata = get_airport_code(origin) or origin.upper()
+    dest_iata = get_airport_code(destination) or destination.upper()
+
+    # 中国国内城市 IATA 码集合
+    CN_IATA = {"PEK", "PKX", "PVG", "SHA", "CAN", "SZX", "CTU", "TFU", "CKG",
+               "XIY", "KMG", "HGH", "NKG", "WUH", "CSX", "XMN", "TAO", "DLC",
+               "HRB", "SHE", "KWL", "SYX", "HAK", "LXA", "URC", "CGO", "TSN",
+               "FOC", "NNG", "KWE", "LHW", "INC", "XNN", "HET", "TYN", "SJW",
+               "HFE", "KHN", "TNA", "BJS", "SHA"}
+
+    both_cn = origin_iata in CN_IATA and dest_iata in CN_IATA
+
+    # ---- 第1优先级: 飞常准 (国内航线实时价格) ----
+    if both_cn:
+        try:
+            from .variflight import search_flights_variflight
+            vf_result = await search_flights_variflight(origin, destination, departure_date)
+            if "flights" in vf_result and vf_result["flights"]:
+                logger.info(f"[Flight] VariFlight 实时: {len(vf_result['flights'])} 航班, "
+                           f"最低 ¥{vf_result['flights'][0]['price']:.0f}")
+                return vf_result
+        except Exception as e:
+            logger.debug(f"[Flight] VariFlight 跳过: {e}")
+
+    # ---- 第2优先级: Amadeus (国际航线) ----
     result = await search_flights(
         origin=origin,
         destination=destination,
@@ -259,26 +287,27 @@ async def get_flight_price(
         max_results=3,
     )
 
-    # API 失败 → 降级
-    if "error" in result:
-        origin_code = get_airport_code(origin) or origin.upper()
-        dest_code = get_airport_code(destination) or destination.upper()
-        route_key = f"{origin_code}-{dest_code}"
-        fallback = FALLBACK_FLIGHTS.get(route_key)
+    if "flights" in result and result["flights"]:
+        return result
 
-        if fallback:
-            result["fallback"] = {
-                "note": "API 不可用，使用航线参考均价",
-                "reference_price": fallback["price"],
-                "currency": "CNY",
-                "airline": fallback["airline"],
-                "stops": fallback["stops"],
-            }
-            result["source"] = "参考数据 (离线)"
-        else:
-            result["fallback"] = {
-                "note": "API 不可用且无该航线参考数据",
-                "estimate": "建议按人均 ¥4,000-6,000 估算国际机票",
-            }
+    # ---- 第3优先级: 参考均价降级 ----
+    route_key = f"{origin_iata}-{dest_iata}"
+    fallback = FALLBACK_FLIGHTS.get(route_key)
+
+    result = result if "flights" in result else {}
+    if fallback:
+        result["fallback"] = {
+            "note": "API 不可用，使用航线参考均价",
+            "reference_price": fallback["price"],
+            "currency": "CNY",
+            "airline": fallback["airline"],
+            "stops": fallback["stops"],
+        }
+        result["source"] = "参考数据 (离线)"
+    else:
+        result["fallback"] = {
+            "note": "API 不可用且无该航线参考数据",
+            "estimate": "建议按人均 ¥4,000-6,000 估算国际机票",
+        }
 
     return result
